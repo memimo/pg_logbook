@@ -573,19 +573,17 @@ function scrubChartHTML(f, sf, ef) {
     '<div id="scrubDot" style="position:absolute;width:10px;height:10px;border-radius:50%;background:var(--accent);border:2px solid var(--card-bg);display:none;pointer-events:none;transform:translate(-50%,-50%)"></div></div>' +
     '<div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text-faint);margin-top:6px"><span>' + fmtClock(f.recStart != null ? f.recStart : f.takeoff) + '</span><span>' + f.minAlt + '&ndash;' + f.maxAlt + ' m</span><span>' + fmtClock(f.recEnd != null ? f.recEnd : f.landing) + '</span></div></div>';
 }
-let scrubShowAt = null, scrubHideFn = null;
 function bindScrub(f) {
   const wrap = document.getElementById("scrubWrap");
-  scrubShowAt = scrubHideFn = null;
   if (!wrap || !f.profile || f.profile.length < 2) return;
   const vp = varioProfile(f), sp = speedProfile(f), n = f.profile.length;
   const min = Math.min(...f.profile), max = Math.max(...f.profile), range = Math.max(1, max - min);
   const t0 = f.recStart != null ? f.recStart : f.takeoff, span = recSpan(f);
   const line = document.getElementById("scrubLine"), dot = document.getElementById("scrubDot"), out = document.getElementById("scrubOut");
   const H = 150, pad = 8;
-  const showAt = (frac) => {
+  const show = (clientX) => {
     const r = wrap.getBoundingClientRect();
-    frac = Math.max(0, Math.min(1, frac));
+    const frac = Math.max(0, Math.min(1, (clientX - r.left) / Math.max(1, r.width)));
     const i = Math.round(frac * (n - 1)), alt = f.profile[i];
     const y = H - pad - ((alt - min) / range) * (H - 2 * pad);
     line.style.display = dot.style.display = "block";
@@ -601,106 +599,13 @@ function bindScrub(f) {
       else scrubMarker.setLatLng(ll);
     }
   };
-  const show = (clientX) => {
-    const r = wrap.getBoundingClientRect();
-    showAt((clientX - r.left) / Math.max(1, r.width));
-  };
   const hide = () => {
-    if (replay.playing) return; // keep the cursor while replaying
     line.style.display = dot.style.display = "none"; out.innerHTML = "&nbsp;";
     if (scrubMarker) { try { scrubMarker.remove(); } catch (e) {} scrubMarker = null; }
   };
-  scrubShowAt = showAt; scrubHideFn = hide;
-  wrap.addEventListener("pointermove", (e) => { if (!replay.playing) show(e.clientX); });
-  wrap.addEventListener("pointerdown", (e) => { if (replay.playing) replayStop(); show(e.clientX); });
+  wrap.addEventListener("pointermove", (e) => show(e.clientX));
+  wrap.addEventListener("pointerdown", (e) => show(e.clientX));
   wrap.addEventListener("pointerleave", hide);
-}
-
-function weatherHTML(f) { return '<div id="wxRow"></div>'; } // replaced by the weather feature below
-
-/* ============================ compare two flights ============================ */
-function dualProfileSVG(a, b, h) {
-  const w = 480, pad = 8;
-  const all = a.profile.concat(b.profile);
-  if (!all.length) return "";
-  const min = Math.min(...all), max = Math.max(...all), range = Math.max(1, max - min);
-  const path = (prof) => prof.map((v, i) => (i ? "L" : "M") + ((i / (prof.length - 1)) * w).toFixed(1) + "," + (h - pad - ((v - min) / range) * (h - 2 * pad)).toFixed(1)).join(" ");
-  return '<svg viewBox="0 0 ' + w + ' ' + h + '" preserveAspectRatio="none" style="display:block;width:100%;height:' + h + 'px">' +
-    '<path d="' + path(a.profile) + '" fill="none" stroke="' + t.accent + '" stroke-width="2"/>' +
-    '<path d="' + path(b.profile) + '" fill="none" stroke="' + t.bars.b + '" stroke-width="2" stroke-dasharray="5,4"/></svg>';
-}
-function renderCompareChooser() {
-  const a = state.flights.find((x) => x.id === state.choosingCompare);
-  const others = state.flights.filter((x) => x.id !== state.choosingCompare).slice().reverse();
-  return '<div class="modal-bg" data-act="cancel-compare"><div class="card" style="width:100%;max-width:420px;max-height:80vh;overflow:auto;padding:18px" data-stop="1">' +
-    '<h2 class="disp" style="font-size:15px;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Compare with&hellip;</h2>' +
-    '<div class="sub" style="margin-bottom:12px">' + esc(a ? a.site : "") + ' &middot; ' + (a ? a.date : "") + ' vs:</div>' +
-    others.map((f) => '<div class="row" data-act="compare-pick" data-id="' + f.id + '" style="padding:9px 12px;margin-bottom:6px;display:flex;align-items:center;gap:10px">' +
-      '<div style="flex:1;min-width:0"><div style="font-weight:600;font-size:13.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(f.site || "Unnamed site") + '</div><div class="sub">' + f.date + '</div></div>' +
-      '<div class="num" style="font-weight:700;color:var(--accent)">' + fmtDur(effDur(f)) + '</div></div>').join("") +
-    '<button class="btn" data-act="cancel-compare" style="width:100%;margin-top:6px">Cancel</button></div></div>';
-}
-function renderCompare() {
-  const a = state.flights.find((x) => x.id === state.cmpA), b = state.flights.find((x) => x.id === state.cmpB);
-  if (!a || !b) return '<div class="sub">Pick two flights to compare.</div>';
-  const thA = thermalStats(a), thB = thermalStats(b);
-  const rows = [
-    ["Airtime", effDur(a), effDur(b), fmtDur, true],
-    ["Max altitude", a.maxAlt || 0, b.maxAlt || 0, (v) => v + " m", true],
-    ["Altitude gain", a.altGain || 0, b.altGain || 0, (v) => v + " m", true],
-    ["Max climb", a.maxClimb || 0, b.maxClimb || 0, (v) => "+" + v + " m/s", true],
-    ["Top speed", a.topSpeed || 0, b.topSpeed || 0, (v) => v + " km/h", true],
-    ["Track length", a.trackDist || 0, b.trackDist || 0, fmtDist, true],
-    ["Max distance", a.maxDist || 0, b.maxDist || 0, fmtDist, true],
-    ["XContest", a.score ? a.score.xcPoints : 0, b.score ? b.score.xcPoints : 0, (v) => fmtPts(v) + " pts", true],
-    ["Thermals", thA && thA.count || 0, thB && thB.count || 0, (v) => String(v), true],
-    ["Thermal gain", thA && thA.totalGain || 0, thB && thB.totalGain || 0, (v) => v + " m", true],
-  ];
-  const cell = (v, other, fmt) => '<td style="padding:8px 10px;text-align:right;font-family:var(--font-num);font-weight:' + (v > other ? "700" : "400") + ';color:' + (v > other ? "var(--accent)" : "var(--text)") + '">' + fmt(v) + '</td>';
-  let h = '<button class="ghost" data-act="back-to-flight" data-id="' + a.id + '" style="margin-bottom:12px;margin-left:-8px">&larr; Back</button>';
-  h += '<h2 class="disp" style="font-size:22px;font-weight:800;letter-spacing:-0.5px;margin-bottom:4px">Head to head</h2>';
-  h += '<div class="sub" style="margin-bottom:16px"><span style="color:var(--accent);font-weight:700">&#9644;</span> ' + esc(a.site || "?") + ' &middot; ' + a.date + ' &nbsp;&nbsp; <span style="color:' + t.bars.b + ';font-weight:700">&#9644;</span> ' + esc(b.site || "?") + ' &middot; ' + b.date + '</div>';
-  if (a.profile.length > 1 && b.profile.length > 1)
-    h += '<div class="card" style="padding:16px 18px;margin-bottom:16px"><div class="lbl" style="margin-bottom:8px">Altitude profiles (aligned by flight fraction)</div>' + dualProfileSVG(a, b, 160) + '</div>';
-  h += '<div class="card" style="padding:6px;overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:14px">' +
-    '<tr><th></th><th style="padding:8px 10px;text-align:right;font-size:11.5px;color:var(--text-dim)">' + esc((a.site || "A").slice(0, 18)) + '</th><th style="padding:8px 10px;text-align:right;font-size:11.5px;color:var(--text-dim)">' + esc((b.site || "B").slice(0, 18)) + '</th></tr>' +
-    rows.map(([k, va, vb, fmt]) => '<tr style="border-top:1px solid var(--divider)"><td style="padding:8px 10px;color:var(--text-dim);font-size:13px">' + k + '</td>' + cell(va, vb, fmt) + cell(vb, va, fmt) + '</tr>').join("") +
-    '</table></div>';
-  return h;
-}
-
-/* ============================ flight replay ============================ */
-const replay = { raf: null, frac: 0, playing: false, lastTs: 0 };
-function replayStop() {
-  replay.playing = false;
-  if (replay.raf) cancelAnimationFrame(replay.raf);
-  replay.raf = null;
-  const b = document.getElementById("replayBtn"); if (b) b.innerHTML = "&#9654; Replay";
-}
-function replayToggle(f) {
-  if (replay.playing) { replayStop(); return; }
-  if (!scrubShowAt) return;
-  replay.playing = true; replay.lastTs = 0;
-  if (replay.frac >= 0.999) replay.frac = 0;
-  const b = document.getElementById("replayBtn"); if (b) b.innerHTML = "&#10074;&#10074; Pause";
-  const span = recSpan(f), t0 = f.recStart != null ? f.recStart : f.takeoff;
-  const step = (ts) => {
-    if (!replay.playing) return;
-    if (!replay.lastTs) replay.lastTs = ts;
-    const dt = (ts - replay.lastTs) / 1000; replay.lastTs = ts;
-    const spEl = document.getElementById("rSpeed");
-    replay.frac += (dt * (spEl ? +spEl.value : 30)) / span;
-    if (replay.frac >= 1) {
-      replay.frac = 1;
-      if (scrubShowAt) scrubShowAt(1);
-      replayStop();
-      if (scrubHideFn) scrubHideFn();
-      return;
-    }
-    if (scrubShowAt) scrubShowAt(replay.frac);
-    replay.raf = requestAnimationFrame(step);
-  };
-  replay.raf = requestAnimationFrame(step);
 }
 
 /* ============================ real terrain map (Leaflet) ============================ */
@@ -1295,16 +1200,13 @@ function render() {
   else if (state.view === "flight") html += renderFlight();
   else if (state.view === "records") html += renderRecords();
   else if (state.view === "site") html += renderSite();
-  else if (state.view === "compare") html += renderCompare();
   else if (state.view === "settings") html += renderSettings();
 
   if (state.editId || state.adding) html += renderEdit();
-  if (state.choosingCompare) html += renderCompareChooser();
   app.innerHTML = html;
   afterRender();
 }
 function afterRender() {
-  replayStop(); replay.frac = 0;
   if (state.view === "flight") {
     const f = state.flights.find((x) => x.id === state.selId);
     if (f) { initFlightMap(f); bindScrub(f); } else destroyMap();
@@ -1381,15 +1283,9 @@ function renderFlight() {
     '<h2 class="disp" style="font-size:26px;font-weight:800;letter-spacing:-0.5px">' + esc(f.site || "Unnamed site") + '</h2>' +
     (p ? '<div style="font-size:14px;color:var(--text-dim);margin-top:5px">' + flagEmoji(p.countryCode) + " " + esc(placeLabel(p)) + '</div>' : "") +
     '<div class="sub" style="font-size:13.5px;margin-top:3px">' + f.date + (f.glider ? " &middot; " + esc(f.glider) : "") + (f.device ? " &middot; " + esc(f.device) : "") + '</div></div>' +
-    '<div style="display:flex;gap:8px;flex-wrap:wrap">' + (f.site ? '<button class="btn" data-act="open-site" data-site="' + encodeURIComponent((f.site || "Unknown").trim() || "Unknown") + '">Site page</button>' : "") + (state.flights.length > 1 ? '<button class="btn" data-act="compare" data-id="' + f.id + '">Compare</button>' : "") + '<button class="btn" data-act="share-card" data-id="' + f.id + '">Share card</button><button class="btn" data-act="edit" data-id="' + f.id + '">Edit</button></div></div>';
-  h += weatherHTML(f);
+    '<div style="display:flex;gap:8px;flex-wrap:wrap">' + (f.site ? '<button class="btn" data-act="open-site" data-site="' + encodeURIComponent((f.site || "Unknown").trim() || "Unknown") + '">Site page</button>' : "") + '<button class="btn" data-act="share-card" data-id="' + f.id + '">Share card</button><button class="btn" data-act="edit" data-id="' + f.id + '">Edit</button></div></div>';
   if (f.track && f.track.length > 1) {
-    h += '<div class="card" style="padding:0;overflow:hidden;margin-bottom:16px"><div id="flightMap" style="height:360px;width:100%;z-index:0"></div>' +
-      '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;padding:9px 14px 0">' +
-      '<div style="display:flex;align-items:center;gap:8px"><button class="btn" id="replayBtn" data-act="replay-toggle" data-id="' + f.id + '" style="padding:6px 13px">&#9654; Replay</button>' +
-      '<select class="input" id="rSpeed" style="width:auto;padding:6px 8px"><option value="15">15&times;</option><option value="30" selected>30&times;</option><option value="60">60&times;</option><option value="120">120&times;</option></select>' +
-      '<span class="sub">watch the flight fly itself &mdash; the chart cursor follows</span></div></div>' +
-      varioLegendHTML() + '</div>';
+    h += '<div class="card" style="padding:0;overflow:hidden;margin-bottom:16px"><div id="flightMap" style="height:360px;width:100%;z-index:0"></div>' + varioLegendHTML() + '</div>';
   }
   h += scrubChartHTML(f, sf, ef);
   h += '<div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(140px,1fr))">' + items.map(([k, v]) =>
@@ -1629,11 +1525,6 @@ document.getElementById("app").addEventListener("click", (e) => {
     case "set-palette": state.settings.direction = el.getAttribute("data-dir"); saveSettings(); applyTheme(); render(); break;
     case "set-mode": state.settings.mode = el.getAttribute("data-mode"); saveSettings(); applyTheme(); render(); break;
     case "refresh-loc": refreshLocations(); break;
-    case "replay-toggle": { const f = state.flights.find((x) => x.id === id); if (f) replayToggle(f); break; }
-    case "compare": state.choosingCompare = id; render(); break;
-    case "cancel-compare": if (e.target.closest('[data-stop="1"]') && el.tagName !== "BUTTON") break; state.choosingCompare = null; render(); break;
-    case "compare-pick": state.cmpA = state.choosingCompare; state.cmpB = id; state.choosingCompare = null; state.view = "compare"; render(); window.scrollTo(0, 0); break;
-    case "back-to-flight": state.selId = id; state.view = "flight"; render(); break;
     case "export-csv": exportCSV(); break;
     case "backup-json": backupJSON(); break;
     case "restore-json": document.getElementById("backupInput").click(); break;
