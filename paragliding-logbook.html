@@ -89,6 +89,15 @@
     .wrap { padding:14px 12px calc(90px + env(safe-area-inset-bottom)); }
     .topbar { margin:0 -12px 18px; padding:8px 12px; }
   }
+  #printSheet { display:none; }
+  @media print {
+    .wrap, #toasts, #dropOverlay { display:none !important; }
+    body { background:#fff !important; }
+    #printSheet { display:block !important; color:#000; font-family:Georgia,'Times New Roman',serif; padding:10px; }
+    #printSheet table { width:100%; border-collapse:collapse; font-size:10.5px; }
+    #printSheet th, #printSheet td { border:1px solid #888; padding:3px 6px; text-align:left; }
+    #printSheet th { background:#eee; }
+  }
   @media (prefers-reduced-motion: reduce) { * { transition:none !important; animation:none !important; } }
 </style>
 </head>
@@ -1200,6 +1209,50 @@ function shareCard(f) {
   c.toBlob((b) => downloadFile((f.site || "flight").replace(/\s+/g, "-").toLowerCase() + "-" + f.date + ".png", "image/png", b));
 }
 
+/* ============================ yearly goal + print ============================ */
+function ringSVG(frac, size, col, big, small) {
+  const r = (size - 18) / 2, cx = size / 2, cy = size / 2, C = 2 * Math.PI * r, p = Math.max(0, Math.min(1, frac));
+  return '<svg width="' + size + '" height="' + size + '" style="flex-shrink:0">' +
+    '<circle cx="' + cx + '" cy="' + cy + '" r="' + r + '" fill="none" stroke="' + t.chipBg + '" stroke-width="10"/>' +
+    '<circle cx="' + cx + '" cy="' + cy + '" r="' + r + '" fill="none" stroke="' + col + '" stroke-width="10" stroke-linecap="round" stroke-dasharray="' + C.toFixed(1) + '" stroke-dashoffset="' + (C * (1 - p)).toFixed(1) + '" transform="rotate(-90 ' + cx + ' ' + cy + ')" style="transition:stroke-dashoffset .6s ease"/>' +
+    '<text x="' + cx + '" y="' + (cy - 1) + '" text-anchor="middle" fill="' + t.text + '" font-family="' + t.num.replace(/'/g, "") + '" font-size="' + size * 0.2 + '" font-weight="700">' + big + '</text>' +
+    '<text x="' + cx + '" y="' + (cy + size * 0.14) + '" text-anchor="middle" fill="' + t.textFaint + '" font-size="10">' + small + '</text></svg>';
+}
+function goalHTML(s) {
+  const goal = state.settings.goal || {};
+  if (!goal.hours && !goal.flights) return "";
+  const yr = String(new Date().getFullYear());
+  let h = '<div class="card" style="padding:16px 18px;margin-bottom:13px;display:flex;gap:22px;align-items:center;flex-wrap:wrap">';
+  if (goal.hours) {
+    const frac = s.thisYearSec / (goal.hours * 3600);
+    h += ringSVG(frac, 92, frac >= 1 ? t.track.start : t.accent, Math.round(frac * 100) + "%", "airtime");
+  }
+  if (goal.flights) {
+    const frac = s.thisYearCount / goal.flights;
+    h += ringSVG(frac, 92, frac >= 1 ? t.track.start : t.bars.b, Math.round(frac * 100) + "%", "flights");
+  }
+  h += '<div style="flex:1;min-width:180px"><div class="lbl">' + yr + ' goal</div><div style="font-size:14.5px;margin-top:6px;line-height:1.7">' +
+    (goal.hours ? '<b class="num">' + fmtTotal(s.thisYearSec) + '</b> of ' + goal.hours + ' h airtime' + (s.thisYearSec >= goal.hours * 3600 ? ' <span style="color:' + t.track.start + ';font-weight:700">— done! 🎉</span>' : "") + '<br>' : "") +
+    (goal.flights ? '<b class="num">' + s.thisYearCount + '</b> of ' + goal.flights + ' flights' + (s.thisYearCount >= goal.flights ? ' <span style="color:' + t.track.start + ';font-weight:700">— done! 🎉</span>' : "") : "") +
+    '</div></div></div>';
+  return h;
+}
+function printLogbook() {
+  let sheet = document.getElementById("printSheet");
+  if (!sheet) { sheet = document.createElement("div"); sheet.id = "printSheet"; document.body.appendChild(sheet); }
+  const fl = state.flights.slice().sort((a, b) => (a.date === b.date ? a.takeoff - b.takeoff : a.date < b.date ? -1 : 1));
+  const totalSec = fl.reduce((s, f) => s + effDur(f), 0);
+  const pilots = {}; fl.forEach((f) => { if (f.pilot) pilots[f.pilot] = (pilots[f.pilot] || 0) + 1; });
+  const pilot = (Object.entries(pilots).sort((a, b) => b[1] - a[1])[0] || [""])[0];
+  sheet.innerHTML = '<h1 style="font-size:20px;margin:0 0 4px">Paragliding Logbook' + (pilot ? " — " + esc(pilot) : "") + '</h1>' +
+    '<p style="margin:0 0 12px;font-size:12px">Generated ' + new Date().toISOString().slice(0, 10) + ' · ' + fl.length + ' flights · total airtime ' + fmtTotal(totalSec) + '</p>' +
+    '<table><tr><th>#</th><th>Date</th><th>Site</th><th>Location</th><th>Wing</th><th>Takeoff</th><th>Landing</th><th>Duration</th><th>Max alt</th><th>Distance</th><th>XC pts</th></tr>' +
+    fl.map((f, i) => { const p = placeOf(f); return '<tr><td>' + (i + 1) + '</td><td>' + f.date + '</td><td>' + esc(f.site || "") + '</td><td>' + esc(p ? placeLabel(p) : "") + '</td><td>' + esc(f.glider || "") + '</td><td>' + fmtClock(f.takeoff) + '</td><td>' + fmtClock(f.landing) + '</td><td>' + fmtDur(effDur(f)) + '</td><td>' + (f.maxAlt || 0) + ' m</td><td>' + ((f.maxDist || 0) / 1000).toFixed(1) + ' km</td><td>' + (f.score ? fmtPts(f.score.xcPoints) : "") + '</td></tr>'; }).join("") +
+    '<tr><td colspan="7" style="text-align:right;font-weight:bold">Total</td><td style="font-weight:bold">' + fmtTotal(totalSec) + '</td><td colspan="3"></td></tr></table>' +
+    '<p style="font-size:10px;margin-top:10px">Durations ' + (state.settings.trim ? "trimmed to detected takeoff–landing" : "as recorded") + '. XC points are approximate XContest-style scores.</p>';
+  window.print();
+}
+
 /* ============================ records: badges, heatmap, year review, sites ============================ */
 const BADGE_DEFS = [
   { id: "f1", icon: "🪂", name: "First flight", desc: "Log your first flight", type: "count", v: 1 },
@@ -1421,6 +1474,7 @@ function renderLogbook() {
       '<div style="display:flex;gap:10px;justify-content:center"><button class="btn accent" data-act="import-folder">Import folder</button><button class="btn" data-act="import-files">Import files</button></div></div>';
   }
   if (s) {
+    h += goalHTML(s);
     h += '<div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(150px,1fr));margin-bottom:13px">' +
       statCard("Total airtime", fmtTotal(s.totalSec), s.count + " flights", "var(--accent)", true) +
       statCard("Flights", s.count, s.siteCount + (s.siteCount === 1 ? " site" : " sites"), null, true) +
@@ -1572,6 +1626,15 @@ function renderSettings() {
     '<button class="toggle" data-act="toggle-trim" style="background:' + (state.settings.trim ? "var(--accent)" : "var(--toggle-off)") + '"><span class="knob" style="left:' + (state.settings.trim ? "25px" : "3px") + '"></span></button></div>' +
     (state.settings.trim && totalGhost > 0 ? '<div style="font-size:13px;color:var(--danger);margin-top:12px">Currently reclaiming ' + fmtTotal(totalGhost) + ' of ghost time across ' + trimmable.length + ' flights.</div>' : "") + '</div>';
 
+  // ---- Yearly goal ----
+  const goal = state.settings.goal || {};
+  h += '<div class="card" style="padding:18px 20px;margin-bottom:20px"><div style="display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap"><div>' +
+    '<div style="font-weight:600;font-size:15px">Yearly goal</div>' +
+    '<div style="font-size:13px;color:var(--text-dim);margin-top:4px;line-height:1.5;max-width:520px">Set an airtime and/or flight-count target for the year and the Flights page shows progress rings. Leave at 0 to hide.</div></div>' +
+    '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">' +
+    '<label class="sub">Hours <input class="input" id="gHours" type="number" min="0" step="5" value="' + (goal.hours || 0) + '" style="width:74px;margin-left:4px"></label>' +
+    '<label class="sub">Flights <input class="input" id="gFlights" type="number" min="0" step="5" value="' + (goal.flights || 0) + '" style="width:74px;margin-left:4px"></label></div></div></div>';
+
   // ---- Data management ----
   h += '<div class="lbl" style="margin-bottom:8px">Data</div>';
   h += '<div class="card" style="padding:16px 18px;margin-bottom:14px"><div style="display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap"><div>' +
@@ -1579,7 +1642,8 @@ function renderSettings() {
     '<div style="font-size:13px;color:var(--text-dim);margin-top:4px;line-height:1.5;max-width:520px">CSV for spreadsheets; the JSON backup contains everything (flights, cached locations, settings) and can be restored on any device &mdash; your logbook is never trapped in one browser.</div></div>' +
     '<div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn" data-act="export-csv"' + (state.flights.length ? "" : " disabled") + '>Export CSV</button>' +
     '<button class="btn" data-act="backup-json"' + (state.flights.length ? "" : " disabled") + '>Download backup</button>' +
-    '<button class="btn" data-act="restore-json">Restore backup</button></div></div></div>';
+    '<button class="btn" data-act="restore-json">Restore backup</button>' +
+    '<button class="btn" data-act="print-logbook"' + (state.flights.length ? "" : " disabled") + '>Print logbook</button></div></div></div>';
   h += '<div class="card" style="padding:6px;margin-bottom:14px">';
   if (!state.flights.length) h += '<div style="padding:14px;color:var(--text-faint);font-size:13px">No flights stored.</div>';
   else {
@@ -1721,6 +1785,10 @@ document.getElementById("app").addEventListener("input", (e) => {
 document.getElementById("app").addEventListener("change", (e) => {
   if (e.target.id === "fYear") { state.filters.year = e.target.value; updateFlightList(); }
   else if (e.target.id === "fSort") { state.filters.sort = e.target.value; updateFlightList(); }
+  else if (e.target.id === "gHours" || e.target.id === "gFlights") {
+    state.settings.goal = { hours: Math.max(0, +document.getElementById("gHours").value || 0), flights: Math.max(0, +document.getElementById("gFlights").value || 0) };
+    saveSettings();
+  }
   else if (e.target.hasAttribute("data-wing-interval")) {
     const w = decodeURIComponent(e.target.getAttribute("data-wing-interval"));
     const cur = (state.settings.wings || {})[w] || {};
@@ -1767,6 +1835,7 @@ document.getElementById("app").addEventListener("click", (e) => {
     case "export-csv": exportCSV(); break;
     case "backup-json": backupJSON(); break;
     case "restore-json": document.getElementById("backupInput").click(); break;
+    case "print-logbook": printLogbook(); break;
     case "share-card": { const f = state.flights.find((x) => x.id === id); if (f) shareCard(f); break; }
     case "del-flight": state.pendingDelete = id; render(); break;
     case "del-flight-no": state.pendingDelete = null; render(); break;
