@@ -1964,6 +1964,7 @@ async function wipeAll() {
   state.flights = (await kvGet("flights")) || [];
   state.sites = (await kvGet("sites")) || {};
   state.weather = (await kvGet("weather")) || {};
+  for (const k of Object.keys(state.weather)) if (state.weather[k] == null) delete state.weather[k]; // interrupted fetches: retry next time
   const st = await kvGet("settings"); if (st) state.settings = Object.assign({ trim: true, direction: "topographic", mode: "light" }, st);
   for (const k of Object.keys(state.sites)) attempted.add(k);
   state.loaded = true;
