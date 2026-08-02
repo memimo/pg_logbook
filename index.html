@@ -83,6 +83,7 @@
   }
   @keyframes fadeUp { from { opacity:0; transform:translateY(6px); } to { opacity:1; transform:none; } }
   .card, .row { animation:fadeUp .26s ease both; }
+  #app.re-render .card, #app.re-render .row { animation:none; } /* same-view refreshes don't replay entry animations */
   .btn:active, .ghost:active { transform:translateY(1px); }
   button:focus-visible, .input:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
   @media (max-width:520px) {
@@ -1190,6 +1191,7 @@ function filteredFlights() {
 function updateFlightList() {
   const list = document.getElementById("flightList"), cnt = document.getElementById("fCount");
   if (!list) return;
+  document.getElementById("app").classList.add("re-render"); // typing in the filter shouldn't replay row animations
   const fl = filteredFlights();
   list.innerHTML = fl.map(flightRowHTML).join("") || '<div class="card" style="padding:22px;text-align:center;color:var(--text-faint)">No flights match.</div>';
   if (cnt) cnt.textContent = fl.length + " of " + state.flights.length;
@@ -1492,8 +1494,11 @@ function flightRowHTML(f) {
 }
 
 /* ============================ render ============================ */
+let lastRenderedView = null;
 function render() {
   const app = document.getElementById("app");
+  app.classList.toggle("re-render", lastRenderedView === state.view);
+  lastRenderedView = state.view;
   const mark = '<svg width="26" height="26" viewBox="0 0 180 180" style="flex-shrink:0;vertical-align:middle"><path d="M16 74 Q90 26 164 74 L122 82 Q90 60 58 82 Z" fill="' + t.accent + '"/><path d="M58 82 L86 124 M122 82 L94 124" stroke="' + t.textDim + '" stroke-width="6" fill="none"/><circle cx="90" cy="138" r="9" fill="' + t.track.end + '"/></svg>';
   let html = "";
   // top bar
@@ -1833,15 +1838,20 @@ async function geocodeMissing() {
   }
   if (!pending.length) return;
   geoRunning = true; state.geoBusy = true; render();
+  // refresh sparingly while resolving — a full render per lookup made the whole UI pulse for minutes
+  const canLiveRender = () => state.view !== "flight" && state.view !== "compare";
+  let done = 0;
   for (const [k, la, lo] of pending) {
     attempted.add(k);
     const r = await reverseGeocode(la, lo);
     state.sites[k] = r || { failed: true };
     await saveSites();
-    render();
+    done++;
+    if (canLiveRender() && done % 4 === 0) render();
     await new Promise((res) => setTimeout(res, 700));
   }
-  geoRunning = false; state.geoBusy = false; render();
+  geoRunning = false; state.geoBusy = false;
+  if (canLiveRender()) render();
 }
 function refreshLocations() {
   const next = {};
