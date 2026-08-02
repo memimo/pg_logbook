@@ -526,9 +526,78 @@ function varioColor(v) {
   return "#1d3557";                    // strong sink
 }
 
+function thermalStats(f) {
+  const vp = varioProfile(f);
+  if (!vp || !f.profile || f.profile.length < 2) return null;
+  const n = vp.length, span = recSpan(f), dt = span / (n - 1);
+  const t0 = f.recStart != null ? f.recStart : f.takeoff;
+  let landRel = f.landing - t0; if (landRel < 0) landRel += 86400;
+  const iA = Math.max(0, Math.floor(((f.takeoff - t0) / span) * (n - 1)));
+  const iB = Math.min(n - 1, Math.ceil((landRel / span) * (n - 1)));
+  const th = []; let s = null;
+  for (let i = iA; i <= iB; i++) {
+    const climbing = vp[i] >= 0.2;
+    if (climbing && s === null) s = i;
+    if ((!climbing || i === iB) && s !== null) {
+      const e = climbing ? i : i - 1, dur = (e - s) * dt, gain = f.profile[e] - f.profile[s];
+      if (dur >= 40 && gain >= 30) th.push({ dur, gain, avg: gain / Math.max(1, dur), at: t0 + s * dt });
+      s = null;
+    }
+  }
+  if (!th.length) return { count: 0 };
+  const totalGain = th.reduce((a, x) => a + x.gain, 0), climbTime = th.reduce((a, x) => a + x.dur, 0);
+  const best = th.slice().sort((a, b) => b.gain - a.gain)[0];
+  return { count: th.length, totalGain: Math.round(totalGain), climbTime, best, pct: Math.round((100 * climbTime) / Math.max(1, effDur(f))) };
+}
+
+/* ============================ scrubbable altitude chart ============================ */
+function scrubChartHTML(f, sf, ef) {
+  if (!f.profile || f.profile.length < 2) return "";
+  return '<div class="card" style="padding:16px 18px;margin-bottom:16px">' +
+    '<div style="display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:6px;margin-bottom:8px"><div class="lbl">Altitude &mdash; hover or drag to inspect</div><div id="scrubOut" class="sub" style="font-variant-numeric:tabular-nums;min-height:15px">&nbsp;</div></div>' +
+    '<div id="scrubWrap" style="position:relative;touch-action:none;cursor:crosshair">' + altSVG(f.profile, sf, ef, 150, true) +
+    '<div id="scrubLine" style="position:absolute;top:0;bottom:0;width:1.5px;background:var(--accent);display:none;pointer-events:none"></div>' +
+    '<div id="scrubDot" style="position:absolute;width:10px;height:10px;border-radius:50%;background:var(--accent);border:2px solid var(--card-bg);display:none;pointer-events:none;transform:translate(-50%,-50%)"></div></div>' +
+    '<div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text-faint);margin-top:6px"><span>' + fmtClock(f.recStart != null ? f.recStart : f.takeoff) + '</span><span>' + f.minAlt + '&ndash;' + f.maxAlt + ' m</span><span>' + fmtClock(f.recEnd != null ? f.recEnd : f.landing) + '</span></div></div>';
+}
+function bindScrub(f) {
+  const wrap = document.getElementById("scrubWrap");
+  if (!wrap || !f.profile || f.profile.length < 2) return;
+  const vp = varioProfile(f), sp = speedProfile(f), n = f.profile.length;
+  const min = Math.min(...f.profile), max = Math.max(...f.profile), range = Math.max(1, max - min);
+  const t0 = f.recStart != null ? f.recStart : f.takeoff, span = recSpan(f);
+  const line = document.getElementById("scrubLine"), dot = document.getElementById("scrubDot"), out = document.getElementById("scrubOut");
+  const H = 150, pad = 8;
+  const show = (clientX) => {
+    const r = wrap.getBoundingClientRect();
+    const frac = Math.max(0, Math.min(1, (clientX - r.left) / Math.max(1, r.width)));
+    const i = Math.round(frac * (n - 1)), alt = f.profile[i];
+    const y = H - pad - ((alt - min) / range) * (H - 2 * pad);
+    line.style.display = dot.style.display = "block";
+    line.style.left = (frac * r.width).toFixed(1) + "px";
+    dot.style.left = (frac * r.width).toFixed(1) + "px"; dot.style.top = y.toFixed(1) + "px";
+    const v = vp ? vp[i] : null, s = sp ? sp[i] : null;
+    out.innerHTML = fmtClock(t0 + frac * span) + ' &middot; <b style="color:var(--text)">' + Math.round(alt) + ' m</b>' +
+      (v != null ? ' &middot; <span style="color:' + varioColor(v) + ';font-weight:600">' + (v >= 0 ? "+" : "") + v.toFixed(1) + ' m/s</span>' : "") +
+      (s != null ? " &middot; " + Math.round(s) + " km/h" : "");
+    if (mapInst && window.L && f.track && f.track.length > 1) {
+      const ll = f.track[Math.round(frac * (f.track.length - 1))];
+      if (!scrubMarker) scrubMarker = L.circleMarker(ll, { radius: 6, color: t.mode === "dark" ? "#111" : "#fff", weight: 2, fillColor: t.accent, fillOpacity: 1 }).addTo(mapInst);
+      else scrubMarker.setLatLng(ll);
+    }
+  };
+  const hide = () => {
+    line.style.display = dot.style.display = "none"; out.innerHTML = "&nbsp;";
+    if (scrubMarker) { try { scrubMarker.remove(); } catch (e) {} scrubMarker = null; }
+  };
+  wrap.addEventListener("pointermove", (e) => show(e.clientX));
+  wrap.addEventListener("pointerdown", (e) => show(e.clientX));
+  wrap.addEventListener("pointerleave", hide);
+}
+
 /* ============================ real terrain map (Leaflet) ============================ */
-let mapInst = null;
-function destroyMap() { if (mapInst) { try { mapInst.remove(); } catch (e) {} mapInst = null; } }
+let mapInst = null, scrubMarker = null;
+function destroyMap() { if (mapInst) { try { mapInst.remove(); } catch (e) {} mapInst = null; } scrubMarker = null; }
 function initFlightMap(f) {
   const el = document.getElementById("flightMap");
   if (!el) { destroyMap(); return; }
@@ -846,7 +915,7 @@ function render() {
 function afterRender() {
   if (state.view === "flight") {
     const f = state.flights.find((x) => x.id === state.selId);
-    if (f) initFlightMap(f); else destroyMap();
+    if (f) { initFlightMap(f); bindScrub(f); } else destroyMap();
   } else destroyMap();
 }
 
@@ -927,10 +996,21 @@ function renderFlight() {
   if (f.track && f.track.length > 1) {
     h += '<div class="card" style="padding:0;overflow:hidden;margin-bottom:16px"><div id="flightMap" style="height:360px;width:100%;z-index:0"></div>' + varioLegendHTML() + '</div>';
   }
-  h += '<div class="card" style="padding:16px 18px;margin-bottom:16px"><div class="lbl" style="margin-bottom:8px">Altitude</div>' + altSVG(f.profile, sf, ef, 120, false) +
-    '<div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text-faint);margin-top:6px"><span>' + f.minAlt + ' m</span><span>' + f.maxAlt + ' m</span></div></div>';
+  h += scrubChartHTML(f, sf, ef);
   h += '<div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(140px,1fr))">' + items.map(([k, v]) =>
     '<div class="card" style="padding:13px 15px"><div class="lbl">' + k + '</div><div class="num" style="font-size:19px;font-weight:700;margin-top:4px">' + v + '</div></div>').join("") + '</div>';
+  const th = thermalStats(f);
+  if (th && th.count) {
+    h += '<div class="lbl" style="margin:22px 0 10px">Thermals</div>' +
+      '<div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(150px,1fr))">' +
+      statCard("Climbs worked", th.count, "sustained &ge;40 s, &ge;30 m") +
+      statCard("Height gained", th.totalGain + " m", "across all climbs") +
+      statCard("Best climb", "+" + Math.round(th.best.gain) + " m", "avg " + th.best.avg.toFixed(1) + " m/s &middot; " + fmtDur(th.best.dur) + " &middot; " + fmtClock(th.best.at)) +
+      statCard("Time climbing", th.pct + "%", fmtDur(th.climbTime) + " of the flight") + '</div>' +
+      '<div class="sub" style="margin-top:8px">Estimated from the stored altitude trace &mdash; the coloured track on the map shows where each climb happened.</div>';
+  } else if (th && !th.count) {
+    h += '<div class="lbl" style="margin:22px 0 10px">Thermals</div><div class="card" style="padding:13px 15px"><div class="sub">No sustained climbs detected &mdash; a smooth glide or sledder.</div></div>';
+  }
   const sc = f.score;
   if (sc) {
     const tri = sc.triValid
