@@ -97,6 +97,12 @@
 <input id="fileInput" type="file" accept=".igc,.IGC" multiple style="display:none" />
 <input id="folderInput" type="file" webkitdirectory directory multiple style="display:none" />
 <input id="backupInput" type="file" accept=".json,application/json" style="display:none" />
+<div id="dropOverlay" style="display:none;position:fixed;inset:0;z-index:80;pointer-events:none;background:var(--modal-overlay);align-items:center;justify-content:center">
+  <div style="border:2.5px dashed var(--accent);border-radius:12px;padding:36px 52px;background:var(--card-bg);text-align:center">
+    <div style="font-size:38px">🪂</div>
+    <div class="disp" style="font-size:18px;font-weight:800;color:var(--text);margin-top:8px">Drop IGC files to import</div>
+  </div>
+</div>
 <script>
 "use strict";
 
@@ -740,6 +746,30 @@ function initFlightMap(f) {
   map.fitBounds(L.latLngBounds(pts), { padding: [26, 26] });
   map.on("click", () => map.scrollWheelZoom.enable());
 }
+function siteLatLon(name) {
+  const f = state.flights.find((x) => ((x.site || "Unknown").trim() || "Unknown") === name && x.takeoffLat != null);
+  return f ? [f.takeoffLat, f.takeoffLon] : null;
+}
+function initSitesMap() {
+  const el = document.getElementById("sitesMap");
+  if (!el) { destroyMap(); return; }
+  destroyMap();
+  const sites = siteAggregates().map((s) => Object.assign({}, s, { ll: siteLatLon(s.name) })).filter((s) => s.ll);
+  if (!window.L || !sites.length) { if (el.parentElement) el.parentElement.style.display = "none"; return; }
+  const map = L.map(el, { scrollWheelZoom: false });
+  mapInst = map;
+  L.tileLayer("https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png", {
+    maxZoom: 17,
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>, SRTM | &copy; <a href="https://opentopomap.org">OpenTopoMap</a> (CC-BY-SA)',
+  }).addTo(map);
+  sites.forEach((s) => {
+    const m = L.circleMarker(s.ll, { radius: 6 + Math.min(7, s.count), color: t.mode === "dark" ? "#111" : "#fff", weight: 2, fillColor: t.accent, fillOpacity: 0.92 }).addTo(map);
+    m.bindTooltip(s.name + " · " + s.count + "× · " + fmtTotal(s.sec));
+    m.on("click", () => { state.selSite = s.name; state.view = "site"; render(); window.scrollTo(0, 0); });
+  });
+  map.fitBounds(L.latLngBounds(sites.map((s) => s.ll)), { padding: [32, 32], maxZoom: 10 });
+  map.on("click", () => map.scrollWheelZoom.enable());
+}
 function varioLegendHTML() {
   const steps = [["#d62828", "&ge;+1.2"], ["#f77f00", "+0.25"], ["#8d99ae", "glide"], ["#457b9d", "sink"], ["#1d3557", "&le;-2.0"]];
   return '<div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:9px 14px;font-size:11px;color:var(--text-dim)">' +
@@ -1242,7 +1272,9 @@ function renderRecords() {
   h += '<div class="lbl" style="margin-bottom:10px">Year in review</div><div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(270px,1fr));margin-bottom:22px">' + yearReviewHTML() + '</div>';
   // sites
   const sites = siteAggregates();
-  h += '<div class="lbl" style="margin-bottom:10px">Sites</div><div class="grid" style="grid-template-columns:1fr;margin-bottom:8px">' +
+  h += '<div class="lbl" style="margin-bottom:10px">Sites</div>';
+  h += '<div class="card" style="padding:0;overflow:hidden;margin-bottom:12px"><div id="sitesMap" style="height:300px;z-index:0"></div></div>';
+  h += '<div class="grid" style="grid-template-columns:1fr;margin-bottom:8px">' +
     sites.map((s) => '<div class="row" data-act="open-site" data-site="' + encodeURIComponent(s.name) + '" style="padding:12px 16px;display:flex;align-items:center;gap:12px">' +
       '<div style="flex:1;min-width:0"><div style="font-weight:600;font-size:14.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + (s.place ? flagEmoji(s.place.countryCode) + " " : "") + esc(s.name) + '</div>' +
       '<div class="sub" style="margin-top:2px">' + (s.place ? esc(placeShort(s.place)) + " &middot; " : "") + s.first.slice(0, 4) + (s.last.slice(0, 4) !== s.first.slice(0, 4) ? "&ndash;" + s.last.slice(0, 4) : "") + ' &middot; best &uarr;' + s.bestAlt + 'm' + (s.bestDist >= 1000 ? " &middot; " + fmtDist(s.bestDist) : "") + '</div></div>' +
@@ -1308,7 +1340,8 @@ function afterRender() {
   if (state.view === "flight") {
     const f = state.flights.find((x) => x.id === state.selId);
     if (f) { initFlightMap(f); bindScrub(f); } else destroyMap();
-  } else destroyMap();
+  } else if (state.view === "records") initSitesMap();
+  else destroyMap();
 }
 
 function renderLogbook() {
@@ -1601,6 +1634,18 @@ function refreshLocations() {
 document.getElementById("fileInput").addEventListener("change", (e) => { if (e.target.files.length) handleFiles(e.target.files); e.target.value = ""; });
 document.getElementById("folderInput").addEventListener("change", (e) => { if (e.target.files.length) handleFiles(e.target.files); e.target.value = ""; });
 document.getElementById("backupInput").addEventListener("change", (e) => { if (e.target.files.length) restoreBackup(e.target.files[0]); e.target.value = ""; });
+let dragDepth = 0;
+const dropOverlay = () => document.getElementById("dropOverlay");
+document.addEventListener("dragover", (e) => e.preventDefault());
+document.addEventListener("dragenter", (e) => {
+  e.preventDefault();
+  if (e.dataTransfer && [...(e.dataTransfer.items || [])].some((i) => i.kind === "file")) { dragDepth++; dropOverlay().style.display = "flex"; }
+});
+document.addEventListener("dragleave", () => { dragDepth = Math.max(0, dragDepth - 1); if (!dragDepth) dropOverlay().style.display = "none"; });
+document.addEventListener("drop", (e) => {
+  e.preventDefault(); dragDepth = 0; dropOverlay().style.display = "none";
+  if (e.dataTransfer && e.dataTransfer.files.length) handleFiles(e.dataTransfer.files);
+});
 document.getElementById("app").addEventListener("input", (e) => {
   if (e.target.id === "fQ") { state.filters.q = e.target.value; updateFlightList(); }
 });
