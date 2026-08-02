@@ -12,6 +12,8 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700;800;900&family=Archivo+Narrow:wght@500;600;700&family=Chakra+Petch:wght@500;600;700&family=Hanken+Grotesk:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&family=Newsreader:ital,opsz,wght@0,18..72,400;0,18..72,500;0,18..72,600;1,18..72,400&family=Space+Grotesk:wght@400;500;600;700&family=Special+Elite&family=Spectral:ital,wght@0,400;0,500;0,600;1,400&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <style>
   /* Theme tokens are injected onto :root by applyTheme(); defaults below = topographic light */
   :root {
@@ -70,6 +72,11 @@
   .seg button.on { background:var(--accent); color:var(--accent-text); }
   .modebtn { width:34px; height:34px; border-radius:var(--radius-sm); border:1px solid var(--chip-border); background:var(--input-bg); color:var(--text-dim); cursor:pointer; font-size:15px; display:flex; align-items:center; justify-content:center; line-height:1; }
   .modebtn:hover { color:var(--text); }
+  .leaflet-container { background:var(--chip-bg); font-family:var(--font-body),sans-serif; border-radius:var(--radius); }
+  .leaflet-container a { color:var(--accent); }
+  body.dark .leaflet-tile-pane { filter:brightness(.72) contrast(1.02) saturate(.78); }
+  body.dark .leaflet-control-attribution { background:rgba(15,18,15,.72); color:#9aa; }
+  body.dark .leaflet-control-zoom a { background:#242a28; color:#cfd8cf; border-color:#3a4038; }
   @media (prefers-reduced-motion: reduce) { * { transition:none !important; } }
 </style>
 </head>
@@ -444,6 +451,7 @@ function applyTheme() {
     "--num-ls": t.numLS, "--label-ls": t.labelLS,
   };
   for (const k in set) r.setProperty(k, set[k]);
+  if (document.body) document.body.classList.toggle("dark", t.mode === "dark");
   const mt = document.querySelector('meta[name="theme-color"]'); if (mt) mt.setAttribute("content", t.bg);
 }
 
@@ -491,6 +499,75 @@ function statCard(label, value, sub, color, big) {
     '<div class="lbl">' + label + '</div>' +
     '<div class="num" style="font-size:' + (big ? 34 : 22) + 'px;font-weight:700;color:' + (color || "var(--text)") + ';line-height:1.15;margin-top:4px">' + value + '</div>' +
     (sub ? '<div class="sub" style="margin-top:3px">' + sub + '</div>' : "") + '</div>';
+}
+
+/* ============================ derived series (vario / speed from stored data) ============================ */
+function recSpan(f) { let d = (f.recEnd != null ? f.recEnd : f.landing) - (f.recStart != null ? f.recStart : f.takeoff); if (d <= 0) d += 86400; return Math.max(1, d); }
+function varioProfile(f) {
+  // approximate vario (m/s) at each profile sample, from the stored altitude profile
+  if (!f.profile || f.profile.length < 2) return null;
+  const n = f.profile.length, dt = recSpan(f) / (n - 1);
+  const raw = f.profile.map((a, i) => (i ? (f.profile[i] - f.profile[i - 1]) / dt : 0));
+  return smoothArr(raw, 2);
+}
+function speedProfile(f) {
+  // approximate ground speed (km/h) resampled onto the profile grid, from the stored track
+  if (!f.track || f.track.length < 2 || !f.profile || f.profile.length < 2) return null;
+  const tn = f.track.length, pn = f.profile.length, dt = recSpan(f) / (tn - 1);
+  const spd = f.track.map((p, i) => (i ? haversine({ lat: f.track[i - 1][0], lon: f.track[i - 1][1] }, { lat: p[0], lon: p[1] }) / dt * 3.6 : 0));
+  const sm = smoothArr(spd, 2);
+  return Array.from({ length: pn }, (_, i) => sm[Math.min(tn - 1, Math.round((i / (pn - 1)) * (tn - 1)))]);
+}
+function varioColor(v) {
+  if (v >= 1.2) return "#d62828";      // strong climb
+  if (v >= 0.25) return "#f77f00";     // climb
+  if (v > -0.6) return "#8d99ae";      // glide
+  if (v > -2.0) return "#457b9d";      // sink
+  return "#1d3557";                    // strong sink
+}
+
+/* ============================ real terrain map (Leaflet) ============================ */
+let mapInst = null;
+function destroyMap() { if (mapInst) { try { mapInst.remove(); } catch (e) {} mapInst = null; } }
+function initFlightMap(f) {
+  const el = document.getElementById("flightMap");
+  if (!el) { destroyMap(); return; }
+  destroyMap();
+  if (!window.L || !f.track || f.track.length < 2) {
+    el.style.height = "auto";
+    el.innerHTML = '<div style="padding:16px 18px"><div class="lbl" style="margin-bottom:8px">Ground track</div><div style="display:flex;justify-content:center">' + trackSVG(f.track, 300, 150, 1.8) + '</div><div class="sub" style="margin-top:8px">Map tiles unavailable (offline?) — showing track outline.</div></div>';
+    return;
+  }
+  const map = L.map(el, { zoomSnap: 0.5, scrollWheelZoom: false });
+  mapInst = map;
+  L.tileLayer("https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png", {
+    maxZoom: 17,
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>, SRTM | &copy; <a href="https://opentopomap.org">OpenTopoMap</a> (CC-BY-SA)',
+  }).addTo(map);
+  const pts = f.track.map((p) => [p[0], p[1]]);
+  // casing for readability over terrain
+  L.polyline(pts, { color: t.mode === "dark" ? "#000" : "#fff", weight: 6, opacity: 0.55, lineJoin: "round" }).addTo(map);
+  // vario-coloured segments
+  const vp = varioProfile(f), tn = pts.length;
+  for (let i = 1; i < tn; i++) {
+    const pi = vp ? Math.min(vp.length - 1, Math.round((i / (tn - 1)) * (vp.length - 1))) : 0;
+    L.polyline([pts[i - 1], pts[i]], { color: vp ? varioColor(vp[pi]) : t.accent, weight: 3, opacity: 0.95, lineJoin: "round" }).addTo(map);
+  }
+  // XC overlays
+  const sc = f.score;
+  if (sc && sc.triVerts && sc.closed20) L.polygon(sc.triVerts, { color: t.accent, weight: 2, dashArray: "6,5", fill: true, fillOpacity: 0.06 }).addTo(map).bindTooltip("Triangle " + fmtKm(sc.triScored) + (sc.isFAI ? " (FAI)" : ""));
+  else if (sc && sc.freeVerts && sc.freeVerts.length > 1) L.polyline(sc.freeVerts, { color: t.bars.b, weight: 1.6, dashArray: "5,6", opacity: 0.85 }).addTo(map).bindTooltip("Free distance " + fmtKm(sc.free));
+  const dot = (ll, col, label) => L.circleMarker(ll, { radius: 7, color: t.mode === "dark" ? "#111" : "#fff", weight: 2, fillColor: col, fillOpacity: 1 }).addTo(map).bindTooltip(label);
+  dot(pts[0], t.track.start, "Launch " + fmtClock(f.takeoff));
+  dot(pts[pts.length - 1], t.track.end, "Landing " + fmtClock(f.landing));
+  map.fitBounds(L.latLngBounds(pts), { padding: [26, 26] });
+  map.on("click", () => map.scrollWheelZoom.enable());
+}
+function varioLegendHTML() {
+  const steps = [["#d62828", "&ge;+1.2"], ["#f77f00", "+0.25"], ["#8d99ae", "glide"], ["#457b9d", "sink"], ["#1d3557", "&le;-2.0"]];
+  return '<div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:9px 14px;font-size:11px;color:var(--text-dim)">' +
+    '<span class="lbl" style="font-size:10px">Climb rate m/s</span>' +
+    steps.map(([c, l]) => '<span style="display:inline-flex;align-items:center;gap:5px"><span style="width:14px;height:4px;border-radius:2px;background:' + c + '"></span>' + l + '</span>').join("") + '</div>';
 }
 
 /* ============================ Pilot's Log (Field Notes) view ============================
@@ -764,6 +841,13 @@ function render() {
 
   if (state.editId || state.adding) html += renderEdit();
   app.innerHTML = html;
+  afterRender();
+}
+function afterRender() {
+  if (state.view === "flight") {
+    const f = state.flights.find((x) => x.id === state.selId);
+    if (f) initFlightMap(f); else destroyMap();
+  } else destroyMap();
 }
 
 function renderLogbook() {
@@ -840,10 +924,11 @@ function renderFlight() {
     (p ? '<div style="font-size:14px;color:var(--text-dim);margin-top:5px">' + flagEmoji(p.countryCode) + " " + esc(placeLabel(p)) + '</div>' : "") +
     '<div class="sub" style="font-size:13.5px;margin-top:3px">' + f.date + (f.glider ? " &middot; " + esc(f.glider) : "") + (f.device ? " &middot; " + esc(f.device) : "") + '</div></div>' +
     '<button class="btn" data-act="edit" data-id="' + f.id + '">Edit</button></div>';
-  h += '<div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(220px,1fr));margin-bottom:16px">' +
-    '<div class="card" style="padding:16px 18px"><div class="lbl" style="margin-bottom:8px">Altitude</div>' + altSVG(f.profile, sf, ef, 120, false) +
-    '<div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text-faint);margin-top:6px"><span>' + f.minAlt + ' m</span><span>' + f.maxAlt + ' m</span></div></div>' +
-    '<div class="card" style="padding:16px 18px"><div class="lbl" style="margin-bottom:8px">Ground track</div><div style="display:flex;justify-content:center">' + trackSVG(f.track, 300, 150, 1.8) + '</div></div></div>';
+  if (f.track && f.track.length > 1) {
+    h += '<div class="card" style="padding:0;overflow:hidden;margin-bottom:16px"><div id="flightMap" style="height:360px;width:100%;z-index:0"></div>' + varioLegendHTML() + '</div>';
+  }
+  h += '<div class="card" style="padding:16px 18px;margin-bottom:16px"><div class="lbl" style="margin-bottom:8px">Altitude</div>' + altSVG(f.profile, sf, ef, 120, false) +
+    '<div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text-faint);margin-top:6px"><span>' + f.minAlt + ' m</span><span>' + f.maxAlt + ' m</span></div></div>';
   h += '<div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(140px,1fr))">' + items.map(([k, v]) =>
     '<div class="card" style="padding:13px 15px"><div class="lbl">' + k + '</div><div class="num" style="font-size:19px;font-weight:700;margin-top:4px">' + v + '</div></div>').join("") + '</div>';
   const sc = f.score;
