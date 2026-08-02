@@ -84,6 +84,7 @@
 <div class="wrap" id="app"></div>
 <input id="fileInput" type="file" accept=".igc,.IGC" multiple style="display:none" />
 <input id="folderInput" type="file" webkitdirectory directory multiple style="display:none" />
+<input id="backupInput" type="file" accept=".json,application/json" style="display:none" />
 <script>
 "use strict";
 
@@ -368,7 +369,7 @@ async function reverseGeocode(lat, lon) {
 const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
 /* ============================ state ============================ */
-const state = { flights: [], sites: {}, settings: { trim: true, direction: "topographic", mode: "light" }, view: "logbook", selId: null, editId: null, adding: false, geoBusy: false, importMsg: null, loaded: false, pendingDelete: null, confirmWipe: false };
+const state = { flights: [], sites: {}, settings: { trim: true, direction: "topographic", mode: "light" }, view: "logbook", selId: null, selSite: null, editId: null, adding: false, geoBusy: false, importMsg: null, loaded: false, pendingDelete: null, confirmWipe: false, filters: { q: "", year: "", sort: "newest" } };
 let geoRunning = false;
 const attempted = new Set();
 
@@ -890,6 +891,111 @@ function computeStats() {
   };
 }
 
+/* ============================ data tools: filter, export, backup, share card ============================ */
+function filteredFlights() {
+  const { q, year, sort } = state.filters;
+  let fl = state.flights.slice();
+  if (year) fl = fl.filter((f) => f.date.slice(0, 4) === year);
+  if (q) {
+    const s = q.toLowerCase();
+    fl = fl.filter((f) => {
+      const p = placeOf(f);
+      return (f.site || "").toLowerCase().includes(s) || (f.glider || "").toLowerCase().includes(s) || f.date.includes(s) ||
+        (p && ((p.country || "").toLowerCase().includes(s) || (p.locality || "").toLowerCase().includes(s) || (p.region || "").toLowerCase().includes(s)));
+    });
+  }
+  const cmp = {
+    newest: (a, b) => (a.date === b.date ? b.takeoff - a.takeoff : a.date < b.date ? 1 : -1),
+    oldest: (a, b) => (a.date === b.date ? a.takeoff - b.takeoff : a.date < b.date ? -1 : 1),
+    longest: (a, b) => effDur(b) - effDur(a),
+    highest: (a, b) => (b.maxAlt || 0) - (a.maxAlt || 0),
+    farthest: (a, b) => (b.maxDist || 0) - (a.maxDist || 0),
+  }[sort] || ((a, b) => 0);
+  return fl.sort(cmp);
+}
+function updateFlightList() {
+  const list = document.getElementById("flightList"), cnt = document.getElementById("fCount");
+  if (!list) return;
+  const fl = filteredFlights();
+  list.innerHTML = fl.map(flightRowHTML).join("") || '<div class="card" style="padding:22px;text-align:center;color:var(--text-faint)">No flights match.</div>';
+  if (cnt) cnt.textContent = fl.length + " of " + state.flights.length;
+}
+function downloadFile(name, mime, content) {
+  const a = document.createElement("a");
+  const url = URL.createObjectURL(content instanceof Blob ? content : new Blob([content], { type: mime }));
+  a.href = url; a.download = name; document.body.appendChild(a); a.click();
+  setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 800);
+}
+function exportCSV() {
+  const cell = (v) => { v = String(v == null ? "" : v); return /[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; };
+  const head = ["date", "site", "locality", "country", "takeoff", "landing", "duration_s", "duration", "max_alt_m", "alt_gain_m", "max_climb_ms", "max_sink_ms", "top_speed_kmh", "track_km", "max_dist_km", "xc_points", "xc_type", "olc_points", "glider"];
+  const rows = state.flights.map((f) => {
+    const p = placeOf(f), sc = f.score;
+    return [f.date, f.site || "", p ? p.locality || "" : "", p ? p.country || "" : "", fmtClock(f.takeoff), fmtClock(f.landing),
+      Math.round(effDur(f)), fmtDur(effDur(f)), f.maxAlt || 0, f.altGain || 0, f.maxClimb || 0, f.maxSink || 0, f.topSpeed || 0,
+      ((f.trackDist || 0) / 1000).toFixed(2), ((f.maxDist || 0) / 1000).toFixed(2),
+      sc ? sc.xcPoints : "", sc ? sc.xcType : "", sc ? sc.olcPoints : "", f.glider || ""].map(cell).join(",");
+  });
+  downloadFile("logbook.csv", "text/csv", head.join(",") + "\n" + rows.join("\n"));
+}
+function backupJSON() {
+  downloadFile("logbook-backup-" + new Date().toISOString().slice(0, 10) + ".json", "application/json",
+    JSON.stringify({ app: "pglog", version: 1, exported: new Date().toISOString(), flights: state.flights, sites: state.sites, settings: state.settings }));
+}
+async function restoreBackup(file) {
+  const flash = (msg) => { state.importMsg = msg; render(); setTimeout(() => { if (state.importMsg === msg) { state.importMsg = null; render(); } }, 5000); };
+  try {
+    const d = JSON.parse(await file.text());
+    if (!d || !Array.isArray(d.flights)) throw new Error("bad");
+    state.flights = d.flights; state.sites = d.sites || {};
+    if (d.settings) state.settings = Object.assign({ trim: true, direction: "topographic", mode: "light" }, d.settings);
+    attempted.clear(); for (const k of Object.keys(state.sites)) attempted.add(k);
+    await saveFlights(); await saveSites(); await saveSettings();
+    applyTheme();
+    flash("Backup restored — " + state.flights.length + " flights");
+  } catch (e) { flash("Couldn't read that backup file — it doesn't look like a logbook backup."); }
+}
+function shareCard(f) {
+  const W = 1200, H = 630, c = document.createElement("canvas"); c.width = W; c.height = H;
+  const x = c.getContext("2d");
+  x.fillStyle = t.bg; x.fillRect(0, 0, W, H);
+  x.fillStyle = t.cardBg; x.fillRect(40, 40, W - 80, H - 80);
+  x.strokeStyle = t.chipBorder; x.lineWidth = 2; x.strokeRect(40, 40, W - 80, H - 80);
+  x.fillStyle = t.accent; x.fillRect(40, 40, W - 80, 10);
+  const p = placeOf(f);
+  x.fillStyle = t.textDim; x.font = "600 22px 'Archivo Narrow','Archivo',sans-serif";
+  x.fillText("F L I G H T   R E C O R D", 90, 122);
+  x.fillStyle = t.text; x.font = "800 58px 'Archivo',sans-serif";
+  x.fillText((f.site || "Unnamed site").slice(0, 26), 86, 186);
+  x.fillStyle = t.textDim; x.font = "26px 'Hanken Grotesk',sans-serif";
+  x.fillText(f.date + (p ? "  ·  " + placeLabel(p) : "") + (f.glider ? "  ·  " + f.glider : ""), 90, 228);
+  const stats = [["AIRTIME", fmtDur(effDur(f))], ["MAX ALT", (f.maxAlt || 0) + " m"], ["DISTANCE", ((f.maxDist || 0) / 1000).toFixed(1) + " km"], ["XC", f.score ? fmtPts(f.score.xcPoints) + " pts" : "—"]];
+  stats.forEach(([k, v], i) => {
+    const sx = 90 + i * 250;
+    x.fillStyle = t.textFaint; x.font = "600 18px 'Archivo Narrow',sans-serif"; x.fillText(k, sx, 470);
+    x.fillStyle = i === 0 ? t.accent : t.text; x.font = "700 44px 'Archivo',sans-serif"; x.fillText(String(v), sx, 520);
+  });
+  if (f.track && f.track.length > 1) {
+    const lat0 = f.track.reduce((s, q) => s + q[0], 0) / f.track.length, k = Math.cos((lat0 * Math.PI) / 180);
+    const xs = f.track.map((q) => q[1] * k), ys = f.track.map((q) => q[0]);
+    const minX = Math.min(...xs), maxX = Math.max(...xs), minY = Math.min(...ys), maxY = Math.max(...ys);
+    const spanX = Math.max(1e-6, maxX - minX), spanY = Math.max(1e-6, maxY - minY);
+    const bx = 760, by = 120, bw = 350, bh = 280;
+    const sc = Math.min(bw / spanX, bh / spanY);
+    const ox = bx + (bw - spanX * sc) / 2, oy = by + (bh - spanY * sc) / 2;
+    const px = (q) => ox + (q[1] * k - minX) * sc, py = (q) => oy + spanY * sc - (q[0] - minY) * sc;
+    x.strokeStyle = t.accent; x.lineWidth = 4; x.lineJoin = "round"; x.beginPath();
+    f.track.forEach((q, i) => (i ? x.lineTo(px(q), py(q)) : x.moveTo(px(q), py(q))));
+    x.stroke();
+    const q0 = f.track[0], q1 = f.track[f.track.length - 1];
+    x.fillStyle = t.track.start; x.beginPath(); x.arc(px(q0), py(q0), 8, 0, 7); x.fill();
+    x.fillStyle = t.track.end; x.beginPath(); x.arc(px(q1), py(q1), 8, 0, 7); x.fill();
+  }
+  x.fillStyle = t.textFaint; x.font = "600 16px 'Archivo Narrow',sans-serif";
+  x.fillText("P A R A G L I D I N G   L O G B O O K", 90, 560);
+  c.toBlob((b) => downloadFile((f.site || "flight").replace(/\s+/g, "-").toLowerCase() + "-" + f.date + ".png", "image/png", b));
+}
+
 /* ============================ records: badges, heatmap, year review, sites ============================ */
 const BADGE_DEFS = [
   { id: "f1", icon: "🪂", name: "First flight", desc: "Log your first flight", type: "count", v: 1 },
@@ -1140,7 +1246,14 @@ function renderLogbook() {
   // flight list
   h += '<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap"><div class="lbl">All flights</div>' +
     '<div style="display:flex;gap:8px"><button class="btn accent" data-act="import-folder">Import folder</button><button class="btn" data-act="add">Add manually</button></div></div>';
-  h += '<div class="grid" style="grid-template-columns:1fr">' + state.flights.slice().reverse().map(flightRowHTML).join("") + '</div>';
+  const years = [...new Set(state.flights.map((f) => f.date.slice(0, 4)))].sort().reverse();
+  const filtered = filteredFlights();
+  h += '<div class="card" style="padding:10px 12px;margin-bottom:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">' +
+    '<input class="input" id="fQ" placeholder="Search site, place, wing, date&hellip;" value="' + esc(state.filters.q) + '" style="flex:1;min-width:170px">' +
+    '<select class="input" id="fYear" style="width:auto"><option value="">All years</option>' + years.map((y) => '<option value="' + y + '"' + (state.filters.year === y ? " selected" : "") + '>' + y + '</option>').join("") + '</select>' +
+    '<select class="input" id="fSort" style="width:auto">' + [["newest", "Newest first"], ["oldest", "Oldest first"], ["longest", "Longest"], ["highest", "Highest"], ["farthest", "Farthest"]].map(([v, l]) => '<option value="' + v + '"' + (state.filters.sort === v ? " selected" : "") + '>' + l + '</option>').join("") + '</select>' +
+    '<span class="sub" id="fCount" style="flex-shrink:0">' + filtered.length + ' of ' + state.flights.length + '</span></div>';
+  h += '<div class="grid" style="grid-template-columns:1fr" id="flightList">' + (filtered.map(flightRowHTML).join("") || '<div class="card" style="padding:22px;text-align:center;color:var(--text-faint)">No flights match.</div>') + '</div>';
   return h;
 }
 
@@ -1158,7 +1271,7 @@ function renderFlight() {
     '<h2 class="disp" style="font-size:26px;font-weight:800;letter-spacing:-0.5px">' + esc(f.site || "Unnamed site") + '</h2>' +
     (p ? '<div style="font-size:14px;color:var(--text-dim);margin-top:5px">' + flagEmoji(p.countryCode) + " " + esc(placeLabel(p)) + '</div>' : "") +
     '<div class="sub" style="font-size:13.5px;margin-top:3px">' + f.date + (f.glider ? " &middot; " + esc(f.glider) : "") + (f.device ? " &middot; " + esc(f.device) : "") + '</div></div>' +
-    '<div style="display:flex;gap:8px">' + (f.site ? '<button class="btn" data-act="open-site" data-site="' + encodeURIComponent((f.site || "Unknown").trim() || "Unknown") + '">Site page</button>' : "") + '<button class="btn" data-act="edit" data-id="' + f.id + '">Edit</button></div></div>';
+    '<div style="display:flex;gap:8px;flex-wrap:wrap">' + (f.site ? '<button class="btn" data-act="open-site" data-site="' + encodeURIComponent((f.site || "Unknown").trim() || "Unknown") + '">Site page</button>' : "") + '<button class="btn" data-act="share-card" data-id="' + f.id + '">Share card</button><button class="btn" data-act="edit" data-id="' + f.id + '">Edit</button></div></div>';
   if (f.track && f.track.length > 1) {
     h += '<div class="card" style="padding:0;overflow:hidden;margin-bottom:16px"><div id="flightMap" style="height:360px;width:100%;z-index:0"></div>' + varioLegendHTML() + '</div>';
   }
@@ -1243,6 +1356,12 @@ function renderSettings() {
 
   // ---- Data management ----
   h += '<div class="lbl" style="margin-bottom:8px">Data</div>';
+  h += '<div class="card" style="padding:16px 18px;margin-bottom:14px"><div style="display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap"><div>' +
+    '<div style="font-weight:600;font-size:15px">Export &amp; backup</div>' +
+    '<div style="font-size:13px;color:var(--text-dim);margin-top:4px;line-height:1.5;max-width:520px">CSV for spreadsheets; the JSON backup contains everything (flights, cached locations, settings) and can be restored on any device &mdash; your logbook is never trapped in one browser.</div></div>' +
+    '<div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn" data-act="export-csv"' + (state.flights.length ? "" : " disabled") + '>Export CSV</button>' +
+    '<button class="btn" data-act="backup-json"' + (state.flights.length ? "" : " disabled") + '>Download backup</button>' +
+    '<button class="btn" data-act="restore-json">Restore backup</button></div></div></div>';
   h += '<div class="card" style="padding:6px;margin-bottom:14px">';
   if (!state.flights.length) h += '<div style="padding:14px;color:var(--text-faint);font-size:13px">No flights stored.</div>';
   else {
@@ -1365,6 +1484,14 @@ function refreshLocations() {
 /* ============================ events ============================ */
 document.getElementById("fileInput").addEventListener("change", (e) => { if (e.target.files.length) handleFiles(e.target.files); e.target.value = ""; });
 document.getElementById("folderInput").addEventListener("change", (e) => { if (e.target.files.length) handleFiles(e.target.files); e.target.value = ""; });
+document.getElementById("backupInput").addEventListener("change", (e) => { if (e.target.files.length) restoreBackup(e.target.files[0]); e.target.value = ""; });
+document.getElementById("app").addEventListener("input", (e) => {
+  if (e.target.id === "fQ") { state.filters.q = e.target.value; updateFlightList(); }
+});
+document.getElementById("app").addEventListener("change", (e) => {
+  if (e.target.id === "fYear") { state.filters.year = e.target.value; updateFlightList(); }
+  else if (e.target.id === "fSort") { state.filters.sort = e.target.value; updateFlightList(); }
+});
 
 document.getElementById("app").addEventListener("click", (e) => {
   const el = e.target.closest("[data-act]");
@@ -1386,6 +1513,10 @@ document.getElementById("app").addEventListener("click", (e) => {
     case "set-palette": state.settings.direction = el.getAttribute("data-dir"); saveSettings(); applyTheme(); render(); break;
     case "set-mode": state.settings.mode = el.getAttribute("data-mode"); saveSettings(); applyTheme(); render(); break;
     case "refresh-loc": refreshLocations(); break;
+    case "export-csv": exportCSV(); break;
+    case "backup-json": backupJSON(); break;
+    case "restore-json": document.getElementById("backupInput").click(); break;
+    case "share-card": { const f = state.flights.find((x) => x.id === id); if (f) shareCard(f); break; }
     case "del-flight": state.pendingDelete = id; render(); break;
     case "del-flight-no": state.pendingDelete = null; render(); break;
     case "del-flight-yes": state.pendingDelete = null; removeFlight(id); render(); break;
