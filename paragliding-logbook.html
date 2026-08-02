@@ -89,6 +89,11 @@
     .wrap { padding:14px 12px calc(90px + env(safe-area-inset-bottom)); }
     .topbar { margin:0 -12px 18px; padding:8px 12px; }
   }
+  #toasts { position:fixed; bottom:calc(18px + env(safe-area-inset-bottom)); left:50%; transform:translateX(-50%); z-index:90; display:flex; flex-direction:column; gap:8px; align-items:center; pointer-events:none; }
+  .toast { background:var(--card-bg); border:1px solid var(--chip-border); color:var(--text); box-shadow:0 6px 20px rgba(0,0,0,.16); padding:10px 18px; border-radius:9px; font-size:13.5px; max-width:min(90vw,480px); animation:fadeUp .25s ease both; }
+  .toast.out { opacity:0; transform:translateY(8px); transition:all .4s; }
+  .confetti { position:fixed; top:-14px; z-index:95; pointer-events:none; border-radius:2px; animation:confettiFall linear both; }
+  @keyframes confettiFall { to { transform:translateY(105vh) rotate(560deg); } }
   #printSheet { display:none; }
   @media print {
     .wrap, #toasts, #dropOverlay { display:none !important; }
@@ -106,6 +111,7 @@
 <input id="fileInput" type="file" accept=".igc,.IGC" multiple style="display:none" />
 <input id="folderInput" type="file" webkitdirectory directory multiple style="display:none" />
 <input id="backupInput" type="file" accept=".json,application/json" style="display:none" />
+<div id="toasts"></div>
 <div id="dropOverlay" style="display:none;position:fixed;inset:0;z-index:80;pointer-events:none;background:var(--modal-overlay);align-items:center;justify-content:center">
   <div style="border:2.5px dashed var(--accent);border-radius:12px;padding:36px 52px;background:var(--card-bg);text-align:center">
     <div style="font-size:38px">🪂</div>
@@ -1104,6 +1110,45 @@ function computeStats() {
   };
 }
 
+/* ============================ toasts, confetti, count-ups ============================ */
+function toast(msg, icon) {
+  const c = document.getElementById("toasts");
+  if (!c) return;
+  const d = document.createElement("div");
+  d.className = "toast";
+  d.innerHTML = (icon ? icon + " " : "") + esc(msg);
+  c.appendChild(d);
+  setTimeout(() => { d.classList.add("out"); setTimeout(() => d.remove(), 450); }, 4000);
+}
+function confetti() {
+  if (matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  const cols = [t.accent, t.track.start, t.bars.b, t.danger, t.text];
+  for (let i = 0; i < 34; i++) {
+    const d = document.createElement("div");
+    d.className = "confetti";
+    const s = 6 + Math.random() * 6;
+    d.style.cssText += "left:" + (Math.random() * 100) + "vw;width:" + s + "px;height:" + s * 0.6 + "px;background:" + cols[i % cols.length] + ";animation-duration:" + (1.3 + Math.random() * 1.4) + "s;animation-delay:" + (Math.random() * 0.5) + "s";
+    document.body.appendChild(d);
+    setTimeout(() => d.remove(), 3600);
+  }
+}
+function cuFmt(kind, v) { return kind === "total" ? fmtTotal(v) : String(Math.round(v)); }
+function runCountUps() {
+  if (matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  document.querySelectorAll("[data-cu]").forEach((el) => {
+    const target = +el.getAttribute("data-cu"), kind = el.getAttribute("data-cufmt") || "int";
+    if (!isFinite(target)) return;
+    el.removeAttribute("data-cu");
+    const t0 = performance.now(), dur = 700;
+    const tick = (ts) => {
+      const p = Math.min(1, (ts - t0) / dur), e = 1 - Math.pow(1 - p, 3);
+      el.textContent = cuFmt(kind, target * e);
+      if (p < 1) requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  });
+}
+
 /* ============================ data tools: filter, export, backup, share card ============================ */
 function filteredFlights() {
   const { q, year, sort } = state.filters;
@@ -1156,7 +1201,7 @@ function backupJSON() {
     JSON.stringify({ app: "pglog", version: 2, exported: new Date().toISOString(), flights: state.flights, sites: state.sites, settings: state.settings, weather: state.weather }));
 }
 async function restoreBackup(file) {
-  const flash = (msg) => { state.importMsg = msg; render(); setTimeout(() => { if (state.importMsg === msg) { state.importMsg = null; render(); } }, 5000); };
+  const flash = (msg) => { render(); toast(msg); };
   try {
     const d = JSON.parse(await file.text());
     if (!d || !Array.isArray(d.flights)) throw new Error("bad");
@@ -1442,7 +1487,6 @@ function render() {
     '<button class="ghost ' + (state.view === "pilot" ? "on" : "") + '" data-act="nav-pilot">Pilot’s Log</button>' +
     '<button class="ghost ' + (state.view === "records" || state.view === "site" ? "on" : "") + '" data-act="nav-records">Records</button>' +
     '<button class="ghost ' + (state.view === "settings" ? "on" : "") + '" data-act="nav-settings">Settings</button></div></div>';
-  if (state.importMsg) html += '<div class="card" style="padding:10px 14px;margin-bottom:14px;font-size:13px;color:var(--accent);border-color:var(--accent-dim)">' + esc(state.importMsg) + '</div>';
 
   if (state.view === "logbook") html += renderLogbook();
   else if (state.view === "pilot") html += renderPilotLog();
@@ -1464,7 +1508,25 @@ function afterRender() {
     if (f) { initFlightMap(f); bindScrub(f); ensureWeather(f); } else destroyMap();
   } else if (state.view === "records") initSitesMap();
   else destroyMap();
+  runCountUps();
 }
+document.addEventListener("keydown", (e) => {
+  const typing = e.target && (e.target.tagName === "INPUT" || e.target.tagName === "SELECT" || e.target.tagName === "TEXTAREA");
+  if (e.key === "Escape") {
+    if (state.editId || state.adding) { state.editId = null; state.adding = false; render(); }
+    else if (state.choosingCompare) { state.choosingCompare = null; render(); }
+    else if (state.view === "flight") { state.view = state.returnView || "logbook"; state.selId = null; render(); }
+    else if (state.view === "site") { state.view = "records"; render(); }
+    return;
+  }
+  if (typing || state.view !== "flight" || (e.key !== "ArrowLeft" && e.key !== "ArrowRight")) return;
+  const fl = filteredFlights();
+  const i = fl.findIndex((f) => f.id === state.selId);
+  if (i < 0) return;
+  const j = e.key === "ArrowRight" ? i + 1 : i - 1;
+  if (j < 0 || j >= fl.length) return;
+  state.selId = fl[j].id; render(); window.scrollTo(0, 0);
+});
 
 function renderLogbook() {
   let h = "";
@@ -1475,11 +1537,12 @@ function renderLogbook() {
   }
   if (s) {
     h += goalHTML(s);
+    const cu = (v, kind) => '<span data-cu="' + v + '" data-cufmt="' + kind + '">' + cuFmt(kind, v) + '</span>';
     h += '<div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(150px,1fr));margin-bottom:13px">' +
-      statCard("Total airtime", fmtTotal(s.totalSec), s.count + " flights", "var(--accent)", true) +
-      statCard("Flights", s.count, s.siteCount + (s.siteCount === 1 ? " site" : " sites"), null, true) +
-      statCard("This year", fmtTotal(s.thisYearSec), s.thisYearCount + (s.thisYearCount === 1 ? " flight" : " flights"), null, true) +
-      (s.countryList.length ? statCard("Countries", s.countryList.length, s.countryList.slice(0, 6).map((c) => flagEmoji(c.cc)).filter(Boolean).join(" "), null, true) : "") +
+      statCard("Total airtime", cu(s.totalSec, "total"), s.count + " flights", "var(--accent)", true) +
+      statCard("Flights", cu(s.count, "int"), s.siteCount + (s.siteCount === 1 ? " site" : " sites"), null, true) +
+      statCard("This year", cu(s.thisYearSec, "total"), s.thisYearCount + (s.thisYearCount === 1 ? " flight" : " flights"), null, true) +
+      (s.countryList.length ? statCard("Countries", cu(s.countryList.length, "int"), s.countryList.slice(0, 6).map((c) => flagEmoji(c.cc)).filter(Boolean).join(" "), null, true) : "") +
       '</div>';
     h += '<div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(150px,1fr));margin-bottom:18px">' +
       statCard("Longest flight", fmtDur(effDur(s.longest)), esc(s.longest.site), null) +
@@ -1709,6 +1772,8 @@ function renderEdit() {
 /* ============================ import / dedup / geocode ============================ */
 async function handleFiles(fileList) {
   const files = Array.from(fileList).filter((f) => /\.igc$/i.test(f.name));
+  if (!files.length) { toast("No .igc files found in that drop / selection."); return; }
+  const badgesBefore = computeBadges();
   const byFp = new Map(state.flights.map((f) => [f.date + "|" + f.recStart + "|" + f.recEnd, f]));
   const added = []; let dup = 0, skipped = 0; const updates = new Map();
   for (const file of files) {
@@ -1729,10 +1794,17 @@ async function handleFiles(fileList) {
       .concat(added).sort((a, b) => (a.date === b.date ? a.takeoff - b.takeoff : a.date < b.date ? -1 : 1));
     await saveFlights();
   }
-  state.importMsg = added.length + " imported" + (updates.size ? ", " + updates.size + " re-analyzed" : "") +
-    (dup > updates.size ? ", " + (dup - updates.size) + " already in logbook" : "") + (skipped ? ", " + skipped + " skipped" : "");
+  toast(added.length + " imported" + (updates.size ? ", " + updates.size + " re-analysed" : "") +
+    (dup > updates.size ? ", " + (dup - updates.size) + " already in logbook" : "") + (skipped ? ", " + skipped + " skipped" : ""), "🪂");
   render();
-  setTimeout(() => { if (state.importMsg) { state.importMsg = null; render(); } }, 5000);
+  // milestone celebrations
+  const badgesAfter = computeBadges();
+  const fresh = BADGE_DEFS.filter((b) => badgesAfter[b.id] && !badgesBefore[b.id]);
+  if (fresh.length && added.length) {
+    confetti();
+    fresh.slice(0, 4).forEach((b, i) => setTimeout(() => toast("Milestone unlocked: " + b.name, b.icon), 500 + i * 900));
+    if (fresh.length > 4) setTimeout(() => toast("…and " + (fresh.length - 4) + " more milestones — see Records", "🏅"), 500 + 4 * 900);
+  }
   geocodeMissing();
 }
 async function geocodeMissing() {
