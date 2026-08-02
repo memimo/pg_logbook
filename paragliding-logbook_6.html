@@ -594,22 +594,6 @@ function scrubChartHTML(f, sf, ef) {
     '<div id="scrubDot" style="position:absolute;width:10px;height:10px;border-radius:50%;background:var(--accent);border:2px solid var(--card-bg);display:none;pointer-events:none;transform:translate(-50%,-50%)"></div></div>' +
     '<div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text-faint);margin-top:6px"><span>' + fmtClock(f.recStart != null ? f.recStart : f.takeoff) + '</span><span>' + f.minAlt + '&ndash;' + f.maxAlt + ' m</span><span>' + fmtClock(f.recEnd != null ? f.recEnd : f.landing) + '</span></div></div>';
 }
-const lerp = (a, b, u) => a + (b - a) * u;
-function seriesAt(arr, frac) {
-  // linear interpolation between samples — smooth values while scrubbing/replaying
-  if (!arr || arr.length < 2) return null;
-  const x = Math.max(0, Math.min(1, frac)) * (arr.length - 1), i = Math.floor(x), u = x - i;
-  return i >= arr.length - 1 ? arr[arr.length - 1] : lerp(arr[i], arr[i + 1], u);
-}
-function trackPointAt(track, frac) {
-  // Catmull-Rom spline through the stored track points — the replay glides through corners
-  const n = track.length, x = Math.max(0, Math.min(1, frac)) * (n - 1), i = Math.floor(x), u = x - i;
-  if (i >= n - 1) return track[n - 1];
-  const P = (j) => track[Math.max(0, Math.min(n - 1, j))];
-  const p0 = P(i - 1), p1 = P(i), p2 = P(i + 1), p3 = P(i + 2);
-  const cr = (a, b, c, d) => 0.5 * (2 * b + (-a + c) * u + (2 * a - 5 * b + 4 * c - d) * u * u + (-a + 3 * b - 3 * c + d) * u * u * u);
-  return [cr(p0[0], p1[0], p2[0], p3[0]), cr(p0[1], p1[1], p2[1], p3[1])];
-}
 let scrubShowAt = null, scrubHideFn = null;
 function bindScrub(f) {
   const wrap = document.getElementById("scrubWrap");
@@ -623,17 +607,17 @@ function bindScrub(f) {
   const showAt = (frac) => {
     const r = wrap.getBoundingClientRect();
     frac = Math.max(0, Math.min(1, frac));
-    const alt = seriesAt(f.profile, frac);
+    const i = Math.round(frac * (n - 1)), alt = f.profile[i];
     const y = H - pad - ((alt - min) / range) * (H - 2 * pad);
     line.style.display = dot.style.display = "block";
     line.style.left = (frac * r.width).toFixed(1) + "px";
     dot.style.left = (frac * r.width).toFixed(1) + "px"; dot.style.top = y.toFixed(1) + "px";
-    const v = vp ? seriesAt(vp, frac) : null, s = sp ? seriesAt(sp, frac) : null;
+    const v = vp ? vp[i] : null, s = sp ? sp[i] : null;
     out.innerHTML = fmtClock(t0 + frac * span) + ' &middot; <b style="color:var(--text)">' + Math.round(alt) + ' m</b>' +
       (v != null ? ' &middot; <span style="color:' + varioColor(v) + ';font-weight:600">' + (v >= 0 ? "+" : "") + v.toFixed(1) + ' m/s</span>' : "") +
       (s != null ? " &middot; " + Math.round(s) + " km/h" : "");
     if (mapInst && window.L && f.track && f.track.length > 1) {
-      const ll = trackPointAt(f.track, frac);
+      const ll = f.track[Math.round(frac * (f.track.length - 1))];
       if (!scrubMarker) scrubMarker = L.circleMarker(ll, { radius: 6, color: t.mode === "dark" ? "#111" : "#fff", weight: 2, fillColor: t.accent, fillOpacity: 1 }).addTo(mapInst);
       else scrubMarker.setLatLng(ll);
     }
