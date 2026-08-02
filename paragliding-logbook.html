@@ -387,7 +387,7 @@ async function reverseGeocode(lat, lon) {
 const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
 /* ============================ state ============================ */
-const state = { flights: [], sites: {}, settings: { trim: true, direction: "topographic", mode: "light" }, view: "logbook", selId: null, selSite: null, editId: null, adding: false, geoBusy: false, importMsg: null, loaded: false, pendingDelete: null, confirmWipe: false, filters: { q: "", year: "", sort: "newest" } };
+const state = { flights: [], sites: {}, settings: { trim: true, direction: "topographic", mode: "light" }, view: "logbook", selId: null, selSite: null, editId: null, adding: false, geoBusy: false, importMsg: null, loaded: false, pendingDelete: null, confirmWipe: false, filters: { q: "", year: "", sort: "newest" }, weather: {}, choosingCompare: null, cmpA: null, cmpB: null };
 let geoRunning = false;
 const attempted = new Set();
 
@@ -622,7 +622,74 @@ function bindScrub(f) {
   wrap.addEventListener("pointerleave", hide);
 }
 
-function weatherHTML(f) { return '<div id="wxRow"></div>'; } // replaced by the weather feature below
+/* ============================ launch-time weather (Open-Meteo archive, cached) ============================ */
+const compassPt = (deg) => ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE", "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"][Math.round(deg / 22.5) % 16];
+async function fetchWeather(f) {
+  if (f.takeoffLat == null || !/^\d{4}-\d{2}-\d{2}$/.test(f.date)) return null;
+  try {
+    const url = "https://archive-api.open-meteo.com/v1/archive?latitude=" + f.takeoffLat + "&longitude=" + f.takeoffLon +
+      "&start_date=" + f.date + "&end_date=" + f.date +
+      "&hourly=temperature_2m,windspeed_10m,winddirection_10m,windgusts_10m&timezone=UTC";
+    const r = await fetch(url);
+    if (!r.ok) return null;
+    const j = await r.json(), H = j.hourly;
+    if (!H || !H.temperature_2m) return null;
+    const hh = Math.min(23, Math.floor(((f.takeoff % 86400) + 86400) % 86400 / 3600));
+    if (H.temperature_2m[hh] == null) return null;
+    return { temp: H.temperature_2m[hh], ws: H.windspeed_10m[hh], wd: H.winddirection_10m[hh], gust: H.windgusts_10m[hh] };
+  } catch (e) { return null; }
+}
+async function ensureWeather(f) {
+  if (!f || state.weather[f.id] !== undefined) return;
+  state.weather[f.id] = null; // fetching
+  const w = await fetchWeather(f);
+  state.weather[f.id] = w || { failed: true };
+  await kvSet("weather", state.weather);
+  if (state.view === "flight" && state.selId === f.id) {
+    const el = document.getElementById("wxRow");
+    if (el) el.outerHTML = weatherHTML(f);
+  }
+}
+function weatherHTML(f) {
+  const w = state.weather[f.id];
+  let inner = "";
+  if (w === undefined || w === null) { if (f.takeoffLat != null && navigator.onLine !== false) inner = "Looking up launch-time weather&hellip;"; }
+  else if (!w.failed) inner = "🌤 " + Math.round(w.temp) + "&deg;C &middot; wind " + Math.round(w.ws) + " km/h from " + compassPt(w.wd) + (w.gust ? " (gusts " + Math.round(w.gust) + ")" : "") + " &middot; at launch time, 10 m reanalysis";
+  if (!inner) return '<div id="wxRow"></div>';
+  return '<div id="wxRow" class="card" style="display:inline-block;padding:8px 14px;font-size:13px;color:var(--text-dim);margin-bottom:16px">' + inner + '</div>';
+}
+
+/* ============================ wings (gliders) ============================ */
+function wingAggregates() {
+  const map = {};
+  for (const f of state.flights) {
+    const name = (f.glider || "Unknown wing").trim() || "Unknown wing";
+    const o = map[name] || (map[name] = { name, count: 0, sec: 0, first: f.date, last: f.date });
+    o.count++; o.sec += effDur(f);
+    if (f.date < o.first) o.first = f.date;
+    if (f.date > o.last) o.last = f.date;
+  }
+  return Object.values(map).sort((a, b) => b.sec - a.sec);
+}
+function wingsHTML() {
+  const wings = wingAggregates();
+  if (!wings.length) return "";
+  const cfgAll = state.settings.wings || {};
+  return '<div class="lbl" style="margin-bottom:10px">Wings</div><div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(270px,1fr));margin-bottom:22px">' +
+    wings.map((w) => {
+      const cfg = cfgAll[w.name] || {}, intervalH = cfg.intervalH || 100, servicedSec = cfg.servicedSec || 0;
+      const sinceSec = Math.max(0, w.sec - servicedSec), frac = Math.min(1, sinceSec / (intervalH * 3600));
+      const wkey = encodeURIComponent(w.name);
+      return '<div class="card" style="padding:16px 18px">' +
+        '<div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px"><div style="font-weight:700;font-size:15.5px">' + esc(w.name) + '</div><div class="num" style="font-weight:700;color:var(--accent)">' + fmtTotal(w.sec) + '</div></div>' +
+        '<div class="sub" style="margin-top:3px">' + w.count + ' flight' + (w.count === 1 ? "" : "s") + ' &middot; ' + w.first.slice(0, 4) + (w.last.slice(0, 4) !== w.first.slice(0, 4) ? "&ndash;" + w.last.slice(0, 4) : "") + '</div>' +
+        '<div style="margin-top:12px"><div style="display:flex;justify-content:space-between;font-size:11.5px;color:var(--text-dim);margin-bottom:4px"><span>Since last service</span><span style="color:' + (frac >= 1 ? "var(--danger)" : frac > 0.8 ? "var(--accent)" : "var(--text-dim)") + ';font-weight:600">' + fmtTotal(sinceSec) + ' / ' + intervalH + ' h</span></div>' +
+        '<div style="height:7px;border-radius:4px;background:var(--chip-bg);border:1px solid var(--chip-border);overflow:hidden"><div style="height:100%;width:' + (frac * 100).toFixed(1) + '%;background:' + (frac >= 1 ? "var(--danger)" : "var(--accent)") + ';transition:width .3s"></div></div>' +
+        (frac >= 1 ? '<div style="font-size:12px;color:var(--danger);margin-top:6px;font-weight:600">Service / trim check due</div>' : "") + '</div>' +
+        '<div style="display:flex;gap:8px;align-items:center;margin-top:12px;flex-wrap:wrap"><button class="btn" data-act="wing-serviced" data-wing="' + wkey + '" style="padding:6px 12px;font-size:13px">Mark serviced today</button>' +
+        '<select class="input" data-wing-interval="' + wkey + '" style="width:auto;padding:6px 8px;font-size:13px">' + [50, 100, 150, 200].map((v) => '<option value="' + v + '"' + (v === intervalH ? " selected" : "") + '>every ' + v + ' h</option>').join("") + '</select></div></div>';
+    }).join("") + '</div>';
+}
 
 /* ============================ compare two flights ============================ */
 function dualProfileSVG(a, b, h) {
@@ -1077,17 +1144,17 @@ function exportCSV() {
 }
 function backupJSON() {
   downloadFile("logbook-backup-" + new Date().toISOString().slice(0, 10) + ".json", "application/json",
-    JSON.stringify({ app: "pglog", version: 1, exported: new Date().toISOString(), flights: state.flights, sites: state.sites, settings: state.settings }));
+    JSON.stringify({ app: "pglog", version: 2, exported: new Date().toISOString(), flights: state.flights, sites: state.sites, settings: state.settings, weather: state.weather }));
 }
 async function restoreBackup(file) {
   const flash = (msg) => { state.importMsg = msg; render(); setTimeout(() => { if (state.importMsg === msg) { state.importMsg = null; render(); } }, 5000); };
   try {
     const d = JSON.parse(await file.text());
     if (!d || !Array.isArray(d.flights)) throw new Error("bad");
-    state.flights = d.flights; state.sites = d.sites || {};
+    state.flights = d.flights; state.sites = d.sites || {}; state.weather = d.weather || {};
     if (d.settings) state.settings = Object.assign({ trim: true, direction: "topographic", mode: "light" }, d.settings);
     attempted.clear(); for (const k of Object.keys(state.sites)) attempted.add(k);
-    await saveFlights(); await saveSites(); await saveSettings();
+    await saveFlights(); await saveSites(); await saveSettings(); await kvSet("weather", state.weather);
     applyTheme();
     flash("Backup restored — " + state.flights.length + " flights");
   } catch (e) { flash("Couldn't read that backup file — it doesn't look like a logbook backup."); }
@@ -1270,6 +1337,8 @@ function renderRecords() {
   h += heatmapHTML();
   // year in review
   h += '<div class="lbl" style="margin-bottom:10px">Year in review</div><div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(270px,1fr));margin-bottom:22px">' + yearReviewHTML() + '</div>';
+  // wings
+  h += wingsHTML();
   // sites
   const sites = siteAggregates();
   h += '<div class="lbl" style="margin-bottom:10px">Sites</div>';
@@ -1339,7 +1408,7 @@ function afterRender() {
   replayStop(); replay.frac = 0;
   if (state.view === "flight") {
     const f = state.flights.find((x) => x.id === state.selId);
-    if (f) { initFlightMap(f); bindScrub(f); } else destroyMap();
+    if (f) { initFlightMap(f); bindScrub(f); ensureWeather(f); } else destroyMap();
   } else if (state.view === "records") initSitesMap();
   else destroyMap();
 }
@@ -1652,6 +1721,12 @@ document.getElementById("app").addEventListener("input", (e) => {
 document.getElementById("app").addEventListener("change", (e) => {
   if (e.target.id === "fYear") { state.filters.year = e.target.value; updateFlightList(); }
   else if (e.target.id === "fSort") { state.filters.sort = e.target.value; updateFlightList(); }
+  else if (e.target.hasAttribute("data-wing-interval")) {
+    const w = decodeURIComponent(e.target.getAttribute("data-wing-interval"));
+    const cur = (state.settings.wings || {})[w] || {};
+    state.settings.wings = Object.assign({}, state.settings.wings, { [w]: Object.assign({}, cur, { intervalH: +e.target.value || 100 }) });
+    saveSettings(); render();
+  }
 });
 
 document.getElementById("app").addEventListener("click", (e) => {
@@ -1679,6 +1754,16 @@ document.getElementById("app").addEventListener("click", (e) => {
     case "cancel-compare": if (e.target.closest('[data-stop="1"]') && el.tagName !== "BUTTON") break; state.choosingCompare = null; render(); break;
     case "compare-pick": state.cmpA = state.choosingCompare; state.cmpB = id; state.choosingCompare = null; state.view = "compare"; render(); window.scrollTo(0, 0); break;
     case "back-to-flight": state.selId = id; state.view = "flight"; render(); break;
+    case "wing-serviced": {
+      const w = decodeURIComponent(el.getAttribute("data-wing"));
+      const agg = wingAggregates().find((x) => x.name === w);
+      if (agg) {
+        const cur = (state.settings.wings || {})[w] || {};
+        state.settings.wings = Object.assign({}, state.settings.wings, { [w]: Object.assign({}, cur, { servicedSec: agg.sec }) });
+        saveSettings(); render();
+      }
+      break;
+    }
     case "export-csv": exportCSV(); break;
     case "backup-json": backupJSON(); break;
     case "restore-json": document.getElementById("backupInput").click(); break;
@@ -1725,10 +1810,11 @@ function deleteFlight(id) {
   render();
 }
 async function wipeAll() {
-  state.flights = []; state.sites = {}; attempted.clear();
+  state.flights = []; state.sites = {}; state.weather = {}; attempted.clear();
   state.confirmWipe = false; state.pendingDelete = null;
   await kvSet("flights", []);
   await kvSet("sites", {});
+  await kvSet("weather", {});
   render();
 }
 
@@ -1736,6 +1822,7 @@ async function wipeAll() {
 (async function () {
   state.flights = (await kvGet("flights")) || [];
   state.sites = (await kvGet("sites")) || {};
+  state.weather = (await kvGet("weather")) || {};
   const st = await kvGet("settings"); if (st) state.settings = Object.assign({ trim: true, direction: "topographic", mode: "light" }, st);
   for (const k of Object.keys(state.sites)) attempted.add(k);
   state.loaded = true;
