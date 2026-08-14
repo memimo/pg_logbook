@@ -546,8 +546,8 @@ function barsHTML(data, fmt, barColor) {
     '<div style="width:100%;max-width:38px;height:' + ((d.value / max) * 80).toFixed(0) + 'px;min-height:' + (d.value ? 3 : 0) + 'px;background:' + (barColor || t.bars.a) + ';border-radius:3px;opacity:.9"></div>' +
     '<div style="font-size:11px;color:var(--text-faint);white-space:nowrap">' + d.label + '</div></div>').join("") + '</div>';
 }
-function statCard(label, value, sub, color, big) {
-  return '<div class="card" style="padding:' + (big ? "18px 20px" : "14px 16px") + '">' +
+function statCard(label, value, sub, color, big, fid) {
+  return '<div class="card"' + (fid ? ' data-act="open" data-id="' + fid + '"' : '') + ' style="padding:' + (big ? "18px 20px" : "14px 16px") + (fid ? ";cursor:pointer" : "") + '">' +
     '<div class="lbl">' + label + '</div>' +
     '<div class="num" style="font-size:' + (big ? 34 : 22) + 'px;font-weight:700;color:' + (color || "var(--text)") + ';line-height:1.15;margin-top:4px">' + value + '</div>' +
     (sub ? '<div class="sub" style="margin-top:3px">' + sub + '</div>' : "") + '</div>';
@@ -1110,7 +1110,7 @@ function computeStats() {
   const sites = {}, byYear = {}, byMonth = Array(12).fill(0);
   let longest = fl[0], highest = fl[0], farthest = fl[0], totalDist = 0;
   const countries = {}, localities = {};
-  let bestFree = 0, bestTri = 0, bestTriType = "", bestXc = 0, bestOlc = 0;
+  let bestFree = 0, bestFreeFid = null, bestTri = 0, bestTriType = "", bestTriFid = null, bestXc = 0, bestXcFid = null, bestOlc = 0, bestOlcFid = null;
   const xcArr = [], olcArr = [];
   for (const f of fl) {
     const site = (f.site || "Unknown").trim() || "Unknown";
@@ -1123,10 +1123,10 @@ function computeStats() {
     totalDist += f.trackDist || 0;
     const sc = f.score;
     if (sc) {
-      if (sc.free > bestFree) bestFree = sc.free;
-      if (sc.triValid && sc.triScored > bestTri) { bestTri = sc.triScored; bestTriType = sc.isFAI ? "FAI" : "flat"; }
-      if (sc.xcPoints > bestXc) bestXc = sc.xcPoints;
-      if (sc.olcPoints > bestOlc) bestOlc = sc.olcPoints;
+      if (sc.free > bestFree) { bestFree = sc.free; bestFreeFid = f.id; }
+      if (sc.triValid && sc.triScored > bestTri) { bestTri = sc.triScored; bestTriType = sc.isFAI ? "FAI" : "flat"; bestTriFid = f.id; }
+      if (sc.xcPoints > bestXc) { bestXc = sc.xcPoints; bestXcFid = f.id; }
+      if (sc.olcPoints > bestOlc) { bestOlc = sc.olcPoints; bestOlcFid = f.id; }
       xcArr.push(sc.xcPoints); olcArr.push(sc.olcPoints);
     }
     const p = placeOf(f);
@@ -1146,7 +1146,7 @@ function computeStats() {
     thisYearSec: byYear[thisYear] || 0, thisYearCount: fl.filter((f) => f.date.slice(0, 4) === thisYear).length,
     countryList: Object.entries(countries).map(([name, v]) => ({ name, ...v })).sort((a, b) => b.sec - a.sec),
     siteList: Object.entries(localities).map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count),
-    bestFree, bestTri, bestTriType, bestXc, bestOlc, xcTop6, olcTop6,
+    bestFree, bestFreeFid, bestTri, bestTriType, bestTriFid, bestXc, bestXcFid, bestOlc, bestOlcFid, xcTop6, olcTop6,
   };
 }
 
@@ -1370,7 +1370,7 @@ function computeBadges() {
   const fl = state.flights.slice().sort((a, b) => (a.date === b.date ? a.takeoff - b.takeoff : a.date < b.date ? -1 : 1));
   let cumSec = 0, cumCount = 0;
   const sites = new Set(), countries = new Set(), earned = {};
-  const hit = (id, date) => { if (!earned[id]) earned[id] = date; };
+  const hit = (id, date, fid) => { if (!earned[id]) earned[id] = { date, fid }; };
   for (const f of fl) {
     cumCount++; cumSec += effDur(f);
     sites.add((f.site || "Unknown").trim() || "Unknown");
@@ -1386,7 +1386,7 @@ function computeBadges() {
           (b.type === "sites" && sites.size >= b.v) ||
           (b.type === "countries" && countries.size >= b.v) ||
           (b.type === "tri" && f.score && f.score.triValid && f.score.closed20) ||
-          (b.type === "xc" && f.score && f.score.xcPoints >= b.v)) hit(b.id, d);
+          (b.type === "xc" && f.score && f.score.xcPoints >= b.v)) hit(b.id, d, f.id);
     }
   }
   return earned;
@@ -1446,9 +1446,9 @@ function yearReviewHTML() {
       '<div style="display:flex;gap:22px;flex-wrap:wrap;margin-top:10px">' +
       [["Airtime", fmtTotal(sec)], ["Flights", fls.length], ["Sites", sites.size], ["Countries", cs.size || "&mdash;"]].map(([k, v]) =>
         '<div><div class="lbl" style="font-size:10px">' + k + '</div><div class="num" style="font-size:18px;font-weight:700;margin-top:2px">' + v + '</div></div>').join("") + '</div>' +
-      '<div class="sub" style="margin-top:10px;line-height:1.6">Longest: <b style="color:var(--text)">' + fmtDur(effDur(longest)) + '</b> at ' + esc(longest.site || "?") +
-      ' &middot; Highest: <b style="color:var(--text)">' + (hi.maxAlt || 0) + ' m</b>' +
-      ((far.maxDist || 0) >= 1000 ? ' &middot; Farthest: <b style="color:var(--text)">' + fmtDist(far.maxDist) + '</b>' : "") + '</div></div>';
+      '<div class="sub" style="margin-top:10px;line-height:1.6">Longest: <b data-act="open" data-id="' + longest.id + '" style="color:var(--text);cursor:pointer">' + fmtDur(effDur(longest)) + '</b> at ' + esc(longest.site || "?") +
+      ' &middot; Highest: <b data-act="open" data-id="' + hi.id + '" style="color:var(--text);cursor:pointer">' + (hi.maxAlt || 0) + ' m</b>' +
+      ((far.maxDist || 0) >= 1000 ? ' &middot; Farthest: <b data-act="open" data-id="' + far.id + '" style="color:var(--text);cursor:pointer">' + fmtDist(far.maxDist) + '</b>' : "") + '</div></div>';
   }).join("");
 }
 function renderRecords() {
@@ -1463,10 +1463,10 @@ function renderRecords() {
   // milestones
   h += '<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:10px"><div class="lbl">Milestones</div><div class="sub">' + got.length + ' of ' + BADGE_DEFS.length + ' earned</div></div>';
   h += '<div class="grid" style="grid-template-columns:repeat(auto-fill,minmax(150px,1fr));margin-bottom:10px">' +
-    got.map((b) => '<div class="card" style="padding:12px 14px;border-color:var(--accent)"><div style="font-size:22px;line-height:1">' + b.icon + '</div>' +
+    got.map((b) => { const e = earned[b.id]; return '<div class="card" data-act="open" data-id="' + e.fid + '" style="padding:12px 14px;border-color:var(--accent);cursor:pointer"><div style="font-size:22px;line-height:1">' + b.icon + '</div>' +
       '<div style="font-weight:700;font-size:13.5px;margin-top:6px">' + b.name + '</div>' +
       '<div class="sub" style="margin-top:2px">' + b.desc + '</div>' +
-      '<div style="font-size:11px;color:var(--accent);font-weight:600;margin-top:5px">' + earned[b.id] + '</div></div>').join("") + '</div>';
+      '<div style="font-size:11px;color:var(--accent);font-weight:600;margin-top:5px">' + e.date + '</div></div>'; }).join("") + '</div>';
   if (locked.length) h += '<div class="grid" style="grid-template-columns:repeat(auto-fill,minmax(150px,1fr));margin-bottom:22px">' +
     locked.map((b) => '<div class="card" style="padding:12px 14px;opacity:.55"><div style="font-size:22px;line-height:1;filter:grayscale(1)">' + b.icon + '</div>' +
       '<div style="font-weight:700;font-size:13.5px;margin-top:6px">' + b.name + '</div>' +
@@ -1501,8 +1501,8 @@ function renderSite() {
   h += '<div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(140px,1fr));margin-bottom:18px">' +
     statCard("Flights here", agg.count, agg.first + (agg.last !== agg.first ? " &rarr; " + agg.last : ""), "var(--accent)", true) +
     statCard("Airtime here", fmtTotal(agg.sec), "avg " + fmtDur(agg.sec / agg.count), null, true) +
-    statCard("Best altitude", agg.bestAlt + " m", "", null, true) +
-    statCard("Longest flight", fmtDur(effDur(longest)), longest.date, null, true) + '</div>';
+    statCard("Best altitude", agg.bestAlt + " m", "", null, true, fls.slice().sort((a, b) => (b.maxAlt || 0) - (a.maxAlt || 0))[0].id) +
+    statCard("Longest flight", fmtDur(effDur(longest)), longest.date, null, true, longest.id) + '</div>';
   h += '<div class="lbl" style="margin-bottom:10px">Flights at this site</div><div class="grid" style="grid-template-columns:1fr">' +
     fls.slice().reverse().map(flightRowHTML).join("") + '</div>';
   return h;
@@ -1589,9 +1589,9 @@ function renderLogbook() {
       (s.countryList.length ? statCard("Countries", cu(s.countryList.length, "int"), s.countryList.slice(0, 6).map((c) => flagEmoji(c.cc)).filter(Boolean).join(" "), null, true) : "") +
       '</div>';
     h += '<div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(150px,1fr));margin-bottom:18px">' +
-      statCard("Longest flight", fmtDur(effDur(s.longest)), esc(s.longest.site), null) +
-      statCard("Highest point", s.highest.maxAlt + " m", esc(s.highest.site), null) +
-      statCard("Best distance", fmtDist(s.farthest.maxDist), esc(s.farthest.site), null) +
+      statCard("Longest flight", fmtDur(effDur(s.longest)), esc(s.longest.site), null, false, s.longest.id) +
+      statCard("Highest point", s.highest.maxAlt + " m", esc(s.highest.site), null, false, s.highest.id) +
+      statCard("Best distance", fmtDist(s.farthest.maxDist), esc(s.farthest.site), null, false, s.farthest.id) +
       statCard("Avg flight", fmtDur(s.avgSec), s.topSite ? "Most flown: " + esc(s.topSite[0]) : "", null) +
       '</div>';
     h += '<div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(280px,1fr));margin-bottom:22px">' +
@@ -1609,10 +1609,10 @@ function renderLogbook() {
     if (s.bestXc > 0 || s.bestFree > 0) {
       h += '<div class="card" style="padding:16px 18px;margin-bottom:22px"><div class="lbl" style="margin-bottom:12px">Cross-country bests</div>' +
         '<div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(130px,1fr))">' +
-        statCard("Best free dist.", fmtKm(s.bestFree)) +
-        statCard("Best triangle", s.bestTri > 0 ? fmtKm(s.bestTri) : "&mdash;", s.bestTri > 0 ? s.bestTriType + " triangle" : "no closed triangle yet") +
-        statCard("Best XContest", fmtPts(s.bestXc), "pts &middot; top 6: " + fmtPts(s.xcTop6)) +
-        statCard("Best OLC", fmtPts(s.bestOlc), "pts &middot; top 6: " + fmtPts(s.olcTop6)) +
+        statCard("Best free dist.", fmtKm(s.bestFree), null, null, false, s.bestFreeFid) +
+        statCard("Best triangle", s.bestTri > 0 ? fmtKm(s.bestTri) : "&mdash;", s.bestTri > 0 ? s.bestTriType + " triangle" : "no closed triangle yet", null, false, s.bestTriFid) +
+        statCard("Best XContest", fmtPts(s.bestXc), "pts &middot; top 6: " + fmtPts(s.xcTop6), null, false, s.bestXcFid) +
+        statCard("Best OLC", fmtPts(s.bestOlc), "pts &middot; top 6: " + fmtPts(s.olcTop6), null, false, s.bestOlcFid) +
         '</div></div>';
     }
   }
