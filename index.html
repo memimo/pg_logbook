@@ -401,9 +401,25 @@ async function reverseGeocode(lat, lon) {
   return null;
 }
 const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+function utcOffsetOf(f) {
+  const w = state.weather[f.id];
+  if (w && w.utcOffset != null) return w.utcOffset;
+  const k = siteKey(f);
+  if (k) { const v = state.tzOffsets[k + "|" + f.date]; if (typeof v === "number") return v; }
+  return 0;
+}
+async function fetchTzOffset(lat, lon, date) {
+  try {
+    const url = "https://archive-api.open-meteo.com/v1/archive?latitude=" + lat + "&longitude=" + lon +
+      "&start_date=" + date + "&end_date=" + date + "&hourly=temperature_2m&timezone=auto";
+    const r = await fetch(url);
+    if (r.ok) { const j = await r.json(); if (j.utc_offset_seconds != null) return j.utc_offset_seconds; }
+  } catch (e) {}
+  return Math.round(lon / 15) * 3600;
+}
 
 /* ============================ state ============================ */
-const state = { flights: [], sites: {}, settings: { trim: true, direction: "topographic", mode: "light" }, view: "logbook", selId: null, selSite: null, editId: null, adding: false, geoBusy: false, importMsg: null, loaded: false, pendingDelete: null, confirmWipe: false, filters: { q: "", year: "", sort: "newest" }, weather: {}, choosingCompare: null, cmpA: null, cmpB: null };
+const state = { flights: [], sites: {}, settings: { trim: true, direction: "topographic", mode: "light" }, view: "logbook", selId: null, selSite: null, editId: null, adding: false, geoBusy: false, importMsg: null, loaded: false, pendingDelete: null, confirmWipe: false, filters: { q: "", year: "", sort: "newest" }, weather: {}, tzOffsets: {}, choosingCompare: null, cmpA: null, cmpB: null };
 let geoRunning = false;
 const attempted = new Set();
 
@@ -593,7 +609,7 @@ function scrubChartHTML(f, sf, ef) {
     '<div id="scrubWrap" style="position:relative;touch-action:none;cursor:crosshair">' + altSVG(f.profile, sf, ef, 150, true) +
     '<div id="scrubLine" style="position:absolute;top:0;bottom:0;width:1.5px;background:var(--accent);display:none;pointer-events:none"></div>' +
     '<div id="scrubDot" style="position:absolute;width:10px;height:10px;border-radius:50%;background:var(--accent);border:2px solid var(--card-bg);display:none;pointer-events:none;transform:translate(-50%,-50%)"></div></div>' +
-    '<div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text-faint);margin-top:6px"><span>' + fmtClock(f.recStart != null ? f.recStart : f.takeoff) + '</span><span>' + f.minAlt + '&ndash;' + f.maxAlt + ' m</span><span>' + fmtClock(f.recEnd != null ? f.recEnd : f.landing) + '</span></div></div>';
+    '<div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text-faint);margin-top:6px"><span>' + fmtClock((f.recStart != null ? f.recStart : f.takeoff) + utcOffsetOf(f)) + '</span><span>' + f.minAlt + '&ndash;' + f.maxAlt + ' m</span><span>' + fmtClock((f.recEnd != null ? f.recEnd : f.landing) + utcOffsetOf(f)) + '</span></div></div>';
 }
 const lerp = (a, b, u) => a + (b - a) * u;
 function seriesAt(arr, frac) {
@@ -630,7 +646,7 @@ function bindScrub(f) {
     line.style.left = (frac * r.width).toFixed(1) + "px";
     dot.style.left = (frac * r.width).toFixed(1) + "px"; dot.style.top = y.toFixed(1) + "px";
     const v = vp ? seriesAt(vp, frac) : null, s = sp ? seriesAt(sp, frac) : null;
-    out.innerHTML = fmtClock(t0 + frac * span) + ' &middot; <b style="color:var(--text)">' + Math.round(alt) + ' m</b>' +
+    out.innerHTML = fmtClock(t0 + frac * span + utcOffsetOf(f)) + ' &middot; <b style="color:var(--text)">' + Math.round(alt) + ' m</b>' +
       (v != null ? ' &middot; <span style="color:' + varioColor(v) + ';font-weight:600">' + (v >= 0 ? "+" : "") + v.toFixed(1) + ' m/s</span>' : "") +
       (s != null ? " &middot; " + Math.round(s) + " km/h" : "");
     if (mapInst && window.L && f.track && f.track.length > 1) {
@@ -661,14 +677,16 @@ async function fetchWeather(f) {
   try {
     const url = "https://archive-api.open-meteo.com/v1/archive?latitude=" + f.takeoffLat + "&longitude=" + f.takeoffLon +
       "&start_date=" + f.date + "&end_date=" + f.date +
-      "&hourly=temperature_2m,windspeed_10m,winddirection_10m,windgusts_10m&timezone=UTC";
+      "&hourly=temperature_2m,windspeed_10m,winddirection_10m,windgusts_10m&timezone=auto";
     const r = await fetch(url);
     if (!r.ok) return null;
     const j = await r.json(), H = j.hourly;
     if (!H || !H.temperature_2m) return null;
-    const hh = Math.min(23, Math.floor(((f.takeoff % 86400) + 86400) % 86400 / 3600));
+    const utcOffset = j.utc_offset_seconds || 0;
+    const localTakeoff = f.takeoff + utcOffset;
+    const hh = Math.min(23, Math.floor(((localTakeoff % 86400) + 86400) % 86400 / 3600));
     if (H.temperature_2m[hh] == null) return null;
-    return { temp: H.temperature_2m[hh], ws: H.windspeed_10m[hh], wd: H.winddirection_10m[hh], gust: H.windgusts_10m[hh] };
+    return { temp: H.temperature_2m[hh], ws: H.windspeed_10m[hh], wd: H.winddirection_10m[hh], gust: H.windgusts_10m[hh], utcOffset };
   } catch (e) { return null; }
 }
 async function ensureWeather(f) {
@@ -676,6 +694,10 @@ async function ensureWeather(f) {
   state.weather[f.id] = null; // fetching
   const w = await fetchWeather(f);
   state.weather[f.id] = w || { failed: true };
+  if (w && w.utcOffset != null) {
+    const k = siteKey(f);
+    if (k) { state.tzOffsets[k + "|" + f.date] = w.utcOffset; await kvSet("tzOffsets", state.tzOffsets); }
+  }
   await kvSet("weather", state.weather);
   if (state.view === "flight" && state.selId === f.id) {
     const el = document.getElementById("wxRow");
@@ -840,8 +862,8 @@ function initFlightMap(f) {
   if (sc && sc.triVerts && sc.closed20) L.polygon(sc.triVerts, { color: t.accent, weight: 2, dashArray: "6,5", fill: true, fillOpacity: 0.06 }).addTo(map).bindTooltip("Triangle " + fmtKm(sc.triScored) + (sc.isFAI ? " (FAI)" : ""));
   else if (sc && sc.freeVerts && sc.freeVerts.length > 1) L.polyline(sc.freeVerts, { color: t.bars.b, weight: 1.6, dashArray: "5,6", opacity: 0.85 }).addTo(map).bindTooltip("Free distance " + fmtKm(sc.free));
   const dot = (ll, col, label) => L.circleMarker(ll, { radius: 7, color: t.mode === "dark" ? "#111" : "#fff", weight: 2, fillColor: col, fillOpacity: 1 }).addTo(map).bindTooltip(label);
-  dot(pts[0], t.track.start, "Launch " + fmtClock(f.takeoff));
-  dot(pts[pts.length - 1], t.track.end, "Landing " + fmtClock(f.landing));
+  dot(pts[0], t.track.start, "Launch " + fmtClock(f.takeoff + utcOffsetOf(f)));
+  dot(pts[pts.length - 1], t.track.end, "Landing " + fmtClock(f.landing + utcOffsetOf(f)));
   map.fitBounds(L.latLngBounds(pts), { padding: [26, 26] });
   map.on("click", () => map.scrollWheelZoom.enable());
 }
@@ -1207,7 +1229,7 @@ function exportCSV() {
   const head = ["date", "site", "locality", "country", "takeoff", "landing", "duration_s", "duration", "max_alt_m", "alt_gain_m", "max_climb_ms", "max_sink_ms", "top_speed_kmh", "track_km", "max_dist_km", "xc_points", "xc_type", "olc_points", "glider"];
   const rows = state.flights.map((f) => {
     const p = placeOf(f), sc = f.score;
-    return [f.date, f.site || "", p ? p.locality || "" : "", p ? p.country || "" : "", fmtClock(f.takeoff), fmtClock(f.landing),
+    return [f.date, f.site || "", p ? p.locality || "" : "", p ? p.country || "" : "", fmtClock(f.takeoff + utcOffsetOf(f)), fmtClock(f.landing + utcOffsetOf(f)),
       Math.round(effDur(f)), fmtDur(effDur(f)), f.maxAlt || 0, f.altGain || 0, f.maxClimb || 0, f.maxSink || 0, f.topSpeed || 0,
       ((f.trackDist || 0) / 1000).toFixed(2), ((f.maxDist || 0) / 1000).toFixed(2),
       sc ? sc.xcPoints : "", sc ? sc.xcType : "", sc ? sc.olcPoints : "", f.glider || ""].map(cell).join(",");
@@ -1216,17 +1238,17 @@ function exportCSV() {
 }
 function backupJSON() {
   downloadFile("logbook-backup-" + new Date().toISOString().slice(0, 10) + ".json", "application/json",
-    JSON.stringify({ app: "pglog", version: 2, exported: new Date().toISOString(), flights: state.flights, sites: state.sites, settings: state.settings, weather: state.weather }));
+    JSON.stringify({ app: "pglog", version: 2, exported: new Date().toISOString(), flights: state.flights, sites: state.sites, settings: state.settings, weather: state.weather, tzOffsets: state.tzOffsets }));
 }
 async function restoreBackup(file) {
   const flash = (msg) => { render(); toast(msg); };
   try {
     const d = JSON.parse(await file.text());
     if (!d || !Array.isArray(d.flights)) throw new Error("bad");
-    state.flights = d.flights; state.sites = d.sites || {}; state.weather = d.weather || {};
+    state.flights = d.flights; state.sites = d.sites || {}; state.weather = d.weather || {}; state.tzOffsets = d.tzOffsets || {};
     if (d.settings) state.settings = Object.assign({ trim: true, direction: "topographic", mode: "light" }, d.settings);
     attempted.clear(); for (const k of Object.keys(state.sites)) attempted.add(k);
-    await saveFlights(); await saveSites(); await saveSettings(); await kvSet("weather", state.weather);
+    await saveFlights(); await saveSites(); await saveSettings(); await kvSet("weather", state.weather); await kvSet("tzOffsets", state.tzOffsets);
     applyTheme();
     flash("Backup restored — " + state.flights.length + " flights");
   } catch (e) { flash("Couldn't read that backup file — it doesn't look like a logbook backup."); }
@@ -1310,7 +1332,7 @@ function printLogbook() {
   sheet.innerHTML = '<h1 style="font-size:20px;margin:0 0 4px">Paragliding Logbook' + (pilot ? " — " + esc(pilot) : "") + '</h1>' +
     '<p style="margin:0 0 12px;font-size:12px">Generated ' + new Date().toISOString().slice(0, 10) + ' · ' + fl.length + ' flights · total airtime ' + fmtTotal(totalSec) + '</p>' +
     '<table><tr><th>#</th><th>Date</th><th>Site</th><th>Location</th><th>Wing</th><th>Takeoff</th><th>Landing</th><th>Duration</th><th>Max alt</th><th>Distance</th><th>XC pts</th></tr>' +
-    fl.map((f, i) => { const p = placeOf(f); return '<tr><td>' + (i + 1) + '</td><td>' + f.date + '</td><td>' + esc(f.site || "") + '</td><td>' + esc(p ? placeLabel(p) : "") + '</td><td>' + esc(f.glider || "") + '</td><td>' + fmtClock(f.takeoff) + '</td><td>' + fmtClock(f.landing) + '</td><td>' + fmtDur(effDur(f)) + '</td><td>' + (f.maxAlt || 0) + ' m</td><td>' + ((f.maxDist || 0) / 1000).toFixed(1) + ' km</td><td>' + (f.score ? fmtPts(f.score.xcPoints) : "") + '</td></tr>'; }).join("") +
+    fl.map((f, i) => { const p = placeOf(f); return '<tr><td>' + (i + 1) + '</td><td>' + f.date + '</td><td>' + esc(f.site || "") + '</td><td>' + esc(p ? placeLabel(p) : "") + '</td><td>' + esc(f.glider || "") + '</td><td>' + fmtClock(f.takeoff + utcOffsetOf(f)) + '</td><td>' + fmtClock(f.landing + utcOffsetOf(f)) + '</td><td>' + fmtDur(effDur(f)) + '</td><td>' + (f.maxAlt || 0) + ' m</td><td>' + ((f.maxDist || 0) / 1000).toFixed(1) + ' km</td><td>' + (f.score ? fmtPts(f.score.xcPoints) : "") + '</td></tr>'; }).join("") +
     '<tr><td colspan="7" style="text-align:right;font-weight:bold">Total</td><td style="font-weight:bold">' + fmtTotal(totalSec) + '</td><td colspan="3"></td></tr></table>' +
     '<p style="font-size:10px;margin-top:10px">Durations ' + (state.settings.trim ? "trimmed to detected takeoff–landing" : "as recorded") + '. XC points are approximate XContest-style scores.</p>';
   window.print();
@@ -1489,7 +1511,7 @@ function flightRowHTML(f) {
   return '<div class="row" data-act="open" data-id="' + f.id + '" style="padding:13px 16px;display:flex;align-items:center;gap:14px">' +
     '<div style="flex-shrink:0">' + trackSVG(f.track, 64, 44, 1.6) + '</div>' +
     '<div style="flex:1;min-width:0"><div style="font-weight:600;font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(f.site || "Unnamed site") + '</div>' +
-    '<div class="sub" style="margin-top:2px">' + (p ? flagEmoji(p.countryCode) + " " + esc(placeShort(p)) + " &middot; " : "") + f.date + ' &middot; ' + fmtClock(f.takeoff) + ' &middot; &uarr;' + f.maxAlt + 'm' + (f.maxDist >= 1000 ? " &middot; " + fmtDist(f.maxDist) : "") + '</div></div>' +
+    '<div class="sub" style="margin-top:2px">' + (p ? flagEmoji(p.countryCode) + " " + esc(placeShort(p)) + " &middot; " : "") + f.date + ' &middot; ' + fmtClock(f.takeoff + utcOffsetOf(f)) + ' &middot; &uarr;' + f.maxAlt + 'm' + (f.maxDist >= 1000 ? " &middot; " + fmtDist(f.maxDist) : "") + '</div></div>' +
     '<div class="num" style="font-size:19px;font-weight:700;color:var(--accent);flex-shrink:0">' + fmtDur(effDur(f)) + '</div></div>';
 }
 
@@ -1613,7 +1635,7 @@ function renderFlight() {
   const p = placeOf(f), trim = state.settings.trim;
   const sf = trim && f.recEnd != null ? (f.takeoff - f.recStart) / Math.max(1, f.recEnd - f.recStart) : 0;
   const ef = trim && f.recEnd != null ? (f.landing - f.recStart) / Math.max(1, f.recEnd - f.recStart) : 1;
-  const items = [["Airtime", fmtDur(effDur(f))], ["Takeoff", fmtClock(f.takeoff)], ["Landing", fmtClock(f.landing)],
+  const items = [["Airtime", fmtDur(effDur(f))], ["Takeoff", fmtClock(f.takeoff + utcOffsetOf(f))], ["Landing", fmtClock(f.landing + utcOffsetOf(f))],
     ["Max altitude", f.maxAlt + " m"], ["Altitude gain", f.altGain + " m"], ["Max climb", (f.maxClimb > 0 ? "+" : "") + f.maxClimb + " m/s"],
     ["Max sink", f.maxSink + " m/s"], ["Top speed", f.topSpeed + " km/h"], ["Track length", fmtDist(f.trackDist)], ["Max distance", fmtDist(f.maxDist)]];
   let h = '<button class="ghost" data-act="back" style="margin-bottom:12px;margin-left:-8px">&larr; Back</button>';
@@ -1640,7 +1662,7 @@ function renderFlight() {
       '<div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(150px,1fr))">' +
       statCard("Climbs worked", th.count, "sustained &ge;40 s, &ge;30 m") +
       statCard("Height gained", th.totalGain + " m", "across all climbs") +
-      statCard("Best climb", "+" + Math.round(th.best.gain) + " m", "avg " + th.best.avg.toFixed(1) + " m/s &middot; " + fmtDur(th.best.dur) + " &middot; " + fmtClock(th.best.at)) +
+      statCard("Best climb", "+" + Math.round(th.best.gain) + " m", "avg " + th.best.avg.toFixed(1) + " m/s &middot; " + fmtDur(th.best.dur) + " &middot; " + fmtClock(th.best.at + utcOffsetOf(f))) +
       statCard("Time climbing", th.pct + "%", fmtDur(th.climbTime) + " of the flight") + '</div>' +
       '<div class="sub" style="margin-top:8px">Estimated from the stored altitude trace &mdash; the coloured track on the map shows where each climb happened.</div>';
   } else if (th && !th.count) {
@@ -1778,8 +1800,8 @@ function renderEdit() {
     '<h2 class="disp" style="font-size:16px;text-transform:uppercase;letter-spacing:1px;margin-bottom:16px">' + (f ? "Edit flight" : "Add flight") + '</h2>' +
     '<label class="sub">Site / name</label>' + v("e_site", f ? f.site || "" : "") + ' style="margin:4px 0 12px">' +
     '<label class="sub">Date</label><input class="input" id="e_date" type="date" value="' + (f ? f.date : new Date().toISOString().slice(0, 10)) + '" style="margin:4px 0 12px">' +
-    '<div style="display:flex;gap:10px"><div style="flex:1"><label class="sub">Takeoff</label>' + v("e_to", f ? fmtClock(f.takeoff) : "12:00") + ' style="margin-top:4px"></div>' +
-    '<div style="flex:1"><label class="sub">Landing</label>' + v("e_ln", f ? fmtClock(f.landing) : "12:30") + ' style="margin-top:4px"></div></div>' +
+    '<div style="display:flex;gap:10px"><div style="flex:1"><label class="sub">Takeoff (local)</label>' + v("e_to", f ? fmtClock(f.takeoff + utcOffsetOf(f)) : "12:00") + ' style="margin-top:4px"></div>' +
+    '<div style="flex:1"><label class="sub">Landing (local)</label>' + v("e_ln", f ? fmtClock(f.landing + utcOffsetOf(f)) : "12:30") + ' style="margin-top:4px"></div></div>' +
     '<div class="lbl" style="margin:14px 0 6px">Location (optional override)</div>' +
     v("e_loc", f && f.placeOverride ? f.placeOverride.locality || "" : "") + ' placeholder="Locality / town" style="margin-bottom:8px">' +
     '<div style="display:flex;gap:10px"><div style="flex:2">' + v("e_cty", f && f.placeOverride ? f.placeOverride.country || "" : "") + ' placeholder="Country"></div>' +
@@ -1827,6 +1849,7 @@ async function handleFiles(fileList) {
     if (fresh.length > 4) setTimeout(() => toast("…and " + (fresh.length - 4) + " more milestones — see Records", "🏅"), 500 + 4 * 900);
   }
   geocodeMissing();
+  resolveTzOffsets();
 }
 async function geocodeMissing() {
   if (geoRunning) return;
@@ -1852,6 +1875,31 @@ async function geocodeMissing() {
   }
   geoRunning = false; state.geoBusy = false;
   if (canLiveRender()) render();
+}
+async function resolveTzOffsets() {
+  const seen = new Set(), pending = [];
+  for (const f of state.flights) {
+    if (f.takeoffLat == null) continue;
+    const k = siteKey(f);
+    if (!k) continue;
+    const key = k + "|" + f.date;
+    if (state.tzOffsets[key] != null || seen.has(key)) continue;
+    // already have it via weather cache
+    const w = state.weather[f.id];
+    if (w && w.utcOffset != null) { state.tzOffsets[key] = w.utcOffset; seen.add(key); continue; }
+    seen.add(key); pending.push({ key, lat: f.takeoffLat, lon: f.takeoffLon, date: f.date });
+  }
+  if (!pending.length) return;
+  let done = 0;
+  for (const p of pending) {
+    const offset = await fetchTzOffset(p.lat, p.lon, p.date);
+    state.tzOffsets[p.key] = offset;
+    done++;
+    if (done % 6 === 0) { await kvSet("tzOffsets", state.tzOffsets); render(); }
+    await new Promise((res) => setTimeout(res, 350));
+  }
+  await kvSet("tzOffsets", state.tzOffsets);
+  render();
 }
 function refreshLocations() {
   const next = {};
@@ -1952,10 +2000,13 @@ document.getElementById("app").addEventListener("click", (e) => {
 
 function saveEdit() {
   const g = (id) => document.getElementById(id).value;
-  const t = parseClock(g("e_to")), l = parseClock(g("e_ln"));
-  if (t == null || l == null) { document.getElementById("e_err").textContent = "Use HH:MM"; return; }
-  let la = l; if (la < t) la += 86400;
-  const patch = { site: g("e_site").trim(), date: g("e_date"), takeoff: t, landing: la, edited: true };
+  const tLocal = parseClock(g("e_to")), lLocal = parseClock(g("e_ln"));
+  if (tLocal == null || lLocal == null) { document.getElementById("e_err").textContent = "Use HH:MM"; return; }
+  let la = lLocal; if (la < tLocal) la += 86400;
+  const ef = state.editId ? state.flights.find((x) => x.id === state.editId) : null;
+  const offset = ef ? utcOffsetOf(ef) : 0;
+  const t = tLocal - offset, laUTC = la - offset;
+  const patch = { site: g("e_site").trim(), date: g("e_date"), takeoff: t, landing: laUTC, edited: true };
   const loc = g("e_loc").trim(), cty = g("e_cty").trim(), cc = g("e_cc").trim();
   if (loc || cty || cc) patch.placeOverride = { locality: loc, region: "", country: cty, countryCode: cc.toUpperCase() };
   if (state.editId) {
@@ -1977,11 +2028,12 @@ function deleteFlight(id) {
   render();
 }
 async function wipeAll() {
-  state.flights = []; state.sites = {}; state.weather = {}; attempted.clear();
+  state.flights = []; state.sites = {}; state.weather = {}; state.tzOffsets = {}; attempted.clear();
   state.confirmWipe = false; state.pendingDelete = null;
   await kvSet("flights", []);
   await kvSet("sites", {});
   await kvSet("weather", {});
+  await kvSet("tzOffsets", {});
   render();
 }
 
@@ -1990,6 +2042,7 @@ async function wipeAll() {
   state.flights = (await kvGet("flights")) || [];
   state.sites = (await kvGet("sites")) || {};
   state.weather = (await kvGet("weather")) || {};
+  state.tzOffsets = (await kvGet("tzOffsets")) || {};
   for (const k of Object.keys(state.weather)) if (state.weather[k] == null) delete state.weather[k]; // interrupted fetches: retry next time
   const st = await kvGet("settings"); if (st) state.settings = Object.assign({ trim: true, direction: "topographic", mode: "light" }, st);
   for (const k of Object.keys(state.sites)) attempted.add(k);
@@ -1997,6 +2050,7 @@ async function wipeAll() {
   applyTheme();
   render();
   geocodeMissing();
+  resolveTzOffsets();
 })();
 </script>
 </body>
